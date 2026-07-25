@@ -102,6 +102,9 @@ export function AskMemoryOverlay() {
                   </span>
                 </div>
               ))}
+              {askResults.length === 0 && query.trim() !== "" && (
+                <div className={styles.emptyState}>Nothing in memory matches that yet — try different words.</div>
+              )}
             </div>
           </motion.div>
         </motion.div>

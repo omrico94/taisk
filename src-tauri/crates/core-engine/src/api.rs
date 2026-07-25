@@ -155,13 +155,20 @@ struct SearchResult {
     created_at: i64,
 }
 
-/// Phase 2 roadmap item 5a: only surface results whose displayed relevance
-/// (`1 - distance`, matching AskMemoryOverlay.tsx's own formula) is at least
-/// 70% — i.e. `distance <= 0.3`. Filtered server-side so a low-confidence
-/// match is never sent to the client at all, rather than trusting every
-/// client to hide it.
-const RELEVANCE_FLOOR_DISTANCE: f32 = 0.3;
-
+/// Phase 2 roadmap item 5a originally shipped a hard server-side floor
+/// (`distance <= 0.3`, i.e. only results the frontend would display as
+/// "70%+ relevant" — see AskMemoryOverlay.tsx's `1 - distance` formula).
+/// Real-world nomic-embed-text distances turned out not to support that:
+/// a search for "todo" against a memory whose text literally contains "Todo
+/// list" scored a 0.4999 distance (50%) — nowhere near 70% — and gradually
+/// weaker matches trail off from there rather than clustering near 0. A
+/// fixed cutoff calibrated against one query breaks the next one, so there's
+/// no single "right" threshold to hard-code here. Returning the nearest
+/// `limit` matches ranked by relevance and letting the frontend's visible
+/// percentage badge communicate confidence per result — rather than
+/// silently hiding anything below a guessed-at bar — is the fix: a
+/// low-relevance result the user can *see* is low-relevance is more useful
+/// than an empty list.
 async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> Json<Vec<SearchResult>> {
     let Ok(embedding) = state.ollama.embed(&state.config.embedding_model, &q.q).await else {
         return Json(vec![]);
@@ -171,7 +178,6 @@ async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> 
     Json(
         results
             .into_iter()
-            .filter(|r| r.distance <= RELEVANCE_FLOOR_DISTANCE)
             .map(|r| SearchResult {
                 live: live_ids.contains(&r.memory.session_id),
                 text: r.memory.text,
@@ -433,15 +439,20 @@ mod tests {
         assert!(results.is_empty(), "purge(all) should remove every memory row");
     }
 
+    /// Regression (user report, twice — search for a query as literal as
+    /// "todo" against a memory whose text contains "Todo list" came back
+    /// empty): there is no hard relevance floor. Both a near-exact match and
+    /// a genuinely weak one come back, ranked by relevance, so the frontend
+    /// always has something to show — its percentage badge is what
+    /// communicates confidence per result, not a server-side cutoff.
     #[tokio::test]
-    async fn search_excludes_results_below_the_70_percent_relevance_floor() {
+    async fn search_returns_both_strong_and_weak_matches_ranked_by_relevance() {
         let (base, state) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
         let query_embedding = state.ollama.embed("nomic-embed-text", "refactor auth middleware").await.unwrap();
 
-        // High-relevance memory: identical embedding -> cosine distance ~0 ->
-        // ~100% relevance. Must be kept.
+        // High-relevance memory: identical embedding -> cosine distance ~0.
         state
             .repo
             .upsert_memory(&Memory {
@@ -460,8 +471,8 @@ mod tests {
             .unwrap();
 
         // Low-relevance memory: flip half the embedding's dimensions so cosine
-        // distance lands comfortably past 0.3 (well below the 70% floor). Must
-        // be excluded from the response entirely (not just hidden client-side).
+        // distance lands much further away — a weak match, but still a real
+        // one that must be returned, not silently dropped.
         let mut low_embedding = query_embedding.clone();
         for v in low_embedding.iter_mut().take(400) {
             *v = -*v;
@@ -492,9 +503,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(results.len(), 1, "only the high-relevance result should clear the 70% floor");
-        assert_eq!(results[0].session_id, "s-high");
-        assert!(1.0 - results[0].distance >= 0.7);
+        assert_eq!(results.len(), 2, "both the strong and weak match must come back — no hard floor");
+        assert_eq!(results[0].session_id, "s-high", "the closer match must rank first");
+        assert!(results[0].distance < results[1].distance);
     }
 
     #[tokio::test]
