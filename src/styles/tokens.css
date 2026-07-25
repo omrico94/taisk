@@ -1,0 +1,77 @@
+/* Design tokens — verbatim from the approved design handoff (view 2a — Swimlanes).
+   Consumed by components starting in milestone M8. Do not hand-tune values here;
+   change the design doc first, then mirror the change. */
+
+:root {
+  /* Surfaces */
+  --bg-app-gradient: linear-gradient(180deg, #0d1018, #090b11);
+  --bg-page: #08090d;
+  --surface-card: rgba(255, 255, 255, 0.045);
+  --surface-drawer-gradient: linear-gradient(180deg, rgba(20, 24, 32, 0.9), rgba(12, 15, 21, 0.95));
+  --surface-overlay-panel: rgba(18, 22, 30, 0.96);
+  --surface-scrim: rgba(6, 8, 12, 0.62);
+
+  /* Borders */
+  --border-06: rgba(255, 255, 255, 0.06);
+  --border-08: rgba(255, 255, 255, 0.08);
+  --border-09: rgba(255, 255, 255, 0.09);
+  --border-10: rgba(255, 255, 255, 0.1);
+  --border-12: rgba(255, 255, 255, 0.12);
+
+  /* Text */
+  --text-primary: #f2f4f9;
+  --text-primary-alt: #e8eaf0;
+  --text-primary-alt2: #e4e7ef;
+  --text-secondary: #a4abbd;
+  --text-secondary-alt: #c4cad8;
+  --text-muted: #8b93a7;
+  --text-muted-alt: #7a8194;
+  --text-faint: #6b7185;
+  --text-divider-dim: #454b5c;
+
+  /* State colors */
+  --state-working: #38bdf8;
+  --state-working-glow: rgba(56, 189, 248, 0.6);
+  --state-waiting: #fbbf24;
+  --state-waiting-glow: rgba(251, 191, 36, 0.55);
+  --state-idle: #64748b;
+  --state-done: #34d399;
+
+  /* Tool colors */
+  --tool-claude-code: #d98a6a;
+  --tool-aider: #7fbf7f;
+  --tool-cursor: #7aa7ff;
+
+  /* Traffic lights */
+  --traffic-red: #ff5f57;
+  --traffic-yellow: #febc2e;
+  --traffic-green: #28c840;
+
+  /* Links */
+  --link: #7cc5ff;
+  --link-hover: #a9d8ff;
+
+  /* Typography */
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Radii */
+  --radius-card: 15px;
+  --radius-input: 12px;
+  --radius-window: 24px;
+  --radius-pill: 100px;
+
+  /* Spacing */
+  --gap-card: 11px;
+  --gap-lane: 22px;
+  --gap-toolbar: 14px;
+  --gap-card-wrap: 14px;
+  --padding-content: 20px;
+
+  /* Motion */
+  --ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-ambient: 2.6s;
+  --duration-drawer: 0.42s;
+  --duration-overlay: 0.3s;
+  --duration-flip: 680ms;
+}

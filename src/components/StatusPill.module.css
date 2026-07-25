@@ -1,0 +1,39 @@
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 15px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12.5px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.workingDot {
+  background: var(--state-working);
+  box-shadow: 0 0 10px 1px var(--state-working-glow);
+  animation: breathe var(--duration-ambient) ease-in-out infinite;
+}
+
+.waitingDot {
+  background: var(--state-waiting);
+}
+
+.count {
+  font-weight: 600;
+}
+
+.label {
+  color: var(--text-muted-alt);
+}
+
+.divider {
+  color: var(--text-divider-dim);
+}

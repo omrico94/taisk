@@ -1,0 +1,18 @@
+/* Global keyframes referenced by name from CSS modules (plain @keyframes
+   aren't scoped, so these live in one shared file rather than duplicated
+   per-component). Timings match the design tokens exactly.
+
+   These two are ambient/continuous (run regardless of re-renders) and stay
+   plain CSS — only the one-shot entrance/exit motions (drawer slide-in,
+   overlay scale-in, card FLIP moves) were moved to Framer Motion, to keep
+   ambient animation cheap and not tied to React's render cycle. */
+
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.6); opacity: .5; }
+}
+
+@keyframes waitGlow {
+  0%, 100% { box-shadow: 0 0 0 1px var(--w), 0 6px 26px -12px var(--w); }
+  50% { box-shadow: 0 0 0 1px var(--w), 0 12px 44px -6px var(--w); }
+}

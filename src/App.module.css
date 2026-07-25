@@ -1,0 +1,18 @@
+.app {
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg-app-gradient);
+  color: var(--text-primary-alt);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}

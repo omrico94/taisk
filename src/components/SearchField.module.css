@@ -1,0 +1,30 @@
+.field {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  max-width: 520px;
+  padding: 10px 15px;
+  border-radius: var(--radius-input);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glyph {
+  color: var(--text-faint);
+  font-size: 14px;
+}
+
+.input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary-alt);
+  font-size: 13.5px;
+  font-family: inherit;
+}
+
+.input::placeholder {
+  color: var(--text-faint);
+}

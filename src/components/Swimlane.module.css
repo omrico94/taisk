@@ -1,0 +1,50 @@
+.lane {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+}
+
+.labelCol {
+  width: 132px;
+  flex: 0 0 auto;
+  padding-top: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.nameRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chevron {
+  font-size: 10px;
+  color: var(--text-faint);
+  display: inline-block;
+  transition: transform 0.15s var(--ease-standard);
+}
+
+.chevronCollapsed {
+  transform: rotate(-90deg);
+}
+
+.name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary-alt2);
+}
+
+.count {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  margin-top: 3px;
+}
+
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-card-wrap);
+  flex: 1;
+}

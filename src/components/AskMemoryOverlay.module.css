@@ -1,0 +1,123 @@
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--surface-scrim);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 70px;
+  z-index: 20;
+}
+
+.panel {
+  width: 600px;
+  max-width: 90%;
+  border-radius: 20px;
+  background: var(--surface-overlay-panel);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 40px 100px -30px rgba(0, 0, 0, 0.9);
+  overflow: hidden;
+  /* Entrance/exit motion is handled by Framer Motion in AskMemoryOverlay.tsx. */
+}
+
+.inputRow {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border-08);
+}
+
+.icon {
+  color: var(--state-working);
+  font-size: 17px;
+}
+
+.input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 15.5px;
+  font-family: inherit;
+}
+
+.escHint {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.results {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.resultsLabel {
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  padding: 14px 18px 8px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 12px 18px;
+  cursor: pointer;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.relevance {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--state-working);
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  padding: 3px 7px;
+  border-radius: 8px;
+  flex: 0 0 auto;
+}
+
+.body {
+  flex: 1;
+  min-width: 0;
+}
+
+.snippet {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #e6eaf2;
+}
+
+.meta {
+  font-size: 11px;
+  color: var(--text-muted-alt);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+}
+
+.when {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  flex: 0 0 auto;
+}
+
+.whenLive {
+  color: var(--state-done);
+}
+
+.whenHistorical {
+  color: var(--text-muted-alt);
+}
