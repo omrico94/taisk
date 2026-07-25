@@ -23,5 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 
-# Local tool config (dev-server launch shortcuts, not project source)
-.claude/
+# Local tool config (personal dev-server launch shortcut) — but .claude/skills/
+# is real project tooling (e.g. the installer skill) and should be tracked.
+.claude/launch.json
