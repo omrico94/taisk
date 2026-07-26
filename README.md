@@ -12,6 +12,10 @@ No cloud, no accounts, no API keys. Every model call happens on your machine.
 
 ---
 
+![SessionBoard design preview — swimlanes of live session cards, breathing state dots, and a session waiting on approval](docs/design/live-board/preview.gif)
+
+*The board this app is being built to match — from the designer's [interactive prototype](docs/design/live-board/SessionBoard.html) (live data and app chrome are still in progress).*
+
 ## What it does
 
 - **Live board.** Every Claude Code session (CLI or Desktop) shows up as a card the moment it starts — no setup, no manual registration.
@@ -81,9 +85,9 @@ On first run, SessionBoard registers its hooks into `~/.claude/settings.json` (i
 
 ## Design reference
 
-The board UI follows a high-fidelity design handoff from the project's designer — final colors, typography, spacing, motion, and interactions, all specified so they can be reproduced faithfully in the real app.
+The board UI follows a high-fidelity design handoff from the project's designer — final colors, typography, spacing, motion, and interactions, all specified so they can be reproduced faithfully in the real app. The GIF above is captured straight from the prototype below (mocked data and simulated state changes stand in for the real Core Engine; the look, motion, and interactions are the real target).
 
-- [`docs/design/live-board/SessionBoard.html`](docs/design/live-board/SessionBoard.html) — **open this in a browser** for a live, running example of the target board (the "Swimlanes · Cool & technical" direction, view 2a). It's a self-contained prototype: mocked data and simulated state changes stand in for the real Core Engine, but the look, motion, and interactions are the real target.
+- [`docs/design/live-board/SessionBoard.html`](docs/design/live-board/SessionBoard.html) — the full interactive prototype (the "Swimlanes · Cool & technical" direction, view 2a). Open it in a browser to click around live.
 - [`docs/design/live-board/HANDOFF.md`](docs/design/live-board/HANDOFF.md) — the full written handoff: component specs, state-dependent card styling, design tokens (colors/type/radii/spacing), and keyframe timing.
 - [`docs/design/live-board/session_board_prd.md`](docs/design/live-board/session_board_prd.md) — product requirements the design implements.
 
