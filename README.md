@@ -79,6 +79,14 @@ npm run tauri dev
 
 On first run, SessionBoard registers its hooks into `~/.claude/settings.json` (idempotently — safe to run repeatedly, and it only ever touches its own entries) and creates its local data directory at `~/Library/Application Support/SessionBoard` (an embedded LanceDB store — just files on disk, nothing to install).
 
+## Design reference
+
+The board UI follows a high-fidelity design handoff from the project's designer — final colors, typography, spacing, motion, and interactions, all specified so they can be reproduced faithfully in the real app.
+
+- [`docs/design/live-board/SessionBoard.html`](docs/design/live-board/SessionBoard.html) — **open this in a browser** for a live, running example of the target board (the "Swimlanes · Cool & technical" direction, view 2a). It's a self-contained prototype: mocked data and simulated state changes stand in for the real Core Engine, but the look, motion, and interactions are the real target.
+- [`docs/design/live-board/HANDOFF.md`](docs/design/live-board/HANDOFF.md) — the full written handoff: component specs, state-dependent card styling, design tokens (colors/type/radii/spacing), and keyframe timing.
+- [`docs/design/live-board/session_board_prd.md`](docs/design/live-board/session_board_prd.md) — product requirements the design implements.
+
 ## Project layout
 
 ```
