@@ -15,6 +15,7 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
 use crate::categorize::CategorizationConfig;
@@ -22,6 +23,7 @@ use crate::collector::{parse_transcript_for_display, transcript_path, Transcript
 use crate::engine::{EngineCommand, EngineHandle, SessionView};
 use crate::memory_repo::{MemoryRepo, PurgeScope};
 use crate::ollama::OllamaClient;
+use crate::orchestrator::WaitingSessions;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -30,6 +32,11 @@ pub struct AppState {
     pub ollama: Arc<dyn OllamaClient>,
     pub config: Arc<CategorizationConfig>,
     pub claude_projects_dir: PathBuf,
+    /// Shared with `orchestrator::run` — approve/reject/reply from the board
+    /// resolve a `Waiting` session the same way a real hook would, so they
+    /// must evict it from the same durable record reconstruction reads on
+    /// the next restart (see `WaitingSessions`'s doc comment).
+    pub waiting_sessions: Arc<Mutex<WaitingSessions>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -41,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/reply", post(reply))
         .route("/sessions/{id}/recategorize", post(recategorize))
         .route("/sessions/{id}/transcript", get(get_transcript))
+        .route("/categories", get(list_categories).post(create_category))
         .route("/search", get(search))
         .route("/memories", delete(purge_memories))
         // Frontend (Tauri webview / Vite dev server) and this API are
@@ -75,18 +83,31 @@ struct ReplyBody {
     text: Option<String>,
 }
 
+/// Evicts `id` from the durable waiting-record, if present — resolving a
+/// wait from the board must keep that record in sync with the live engine
+/// the same way a real hook does (see `WaitingSessions`), or a restart
+/// shortly after would incorrectly restore it as `Waiting` again.
+async fn unmark_waiting(state: &AppState, id: &str) {
+    let mut waiting = state.waiting_sessions.lock().await;
+    if waiting.unmark_waiting(id) {
+        let _ = waiting.save();
+    }
+}
+
 async fn approve(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
+    unmark_waiting(&state, &id).await;
     state
         .engine
-        .dispatch(EngineCommand::ResolveWaiting { id, task: "Resumed — applying your approval".into() })
+        .dispatch(EngineCommand::ResolveWaiting { id, desc: "Resumed — applying your approval".into() })
         .await;
     StatusCode::OK
 }
 
 async fn reject(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
+    unmark_waiting(&state, &id).await;
     state
         .engine
-        .dispatch(EngineCommand::ResolveWaiting { id, task: "Continuing without that change".into() })
+        .dispatch(EngineCommand::ResolveWaiting { id, desc: "Continuing without that change".into() })
         .await;
     StatusCode::OK
 }
@@ -96,12 +117,13 @@ async fn reply(
     Path(id): Path<String>,
     body: Option<Json<ReplyBody>>,
 ) -> StatusCode {
+    unmark_waiting(&state, &id).await;
     let text = body.and_then(|b| b.0.text).filter(|t| !t.trim().is_empty());
-    let task = match text {
+    let desc = match text {
         Some(t) => format!("Working on: {t}"),
         None => "Working on your reply…".into(),
     };
-    state.engine.dispatch(EngineCommand::ResolveWaiting { id, task }).await;
+    state.engine.dispatch(EngineCommand::ResolveWaiting { id, desc }).await;
     StatusCode::OK
 }
 
@@ -133,6 +155,39 @@ async fn recategorize(
 ) -> StatusCode {
     state.engine.dispatch(EngineCommand::Recategorize { id, category: body.category }).await;
     StatusCode::OK
+}
+
+/// All known categories, oldest-first so a newly created empty lane appends
+/// at the end of the board rather than jumping into alphabetical order
+/// (matches the design's `cats.push(name)` — new categories are additive,
+/// not resorted).
+async fn list_categories(State(state): State<AppState>) -> Json<Vec<String>> {
+    let mut exemplars = state.repo.list_exemplars().await.unwrap_or_default();
+    exemplars.sort_by_key(|e| e.created_at);
+    Json(exemplars.into_iter().map(|e| e.category).collect())
+}
+
+#[derive(Deserialize)]
+struct CreateCategoryBody {
+    name: String,
+}
+
+/// Creates a new, empty category (Phase 2 §5 — the board's "+ New category"
+/// control). Seeds its exemplar from the category name's own embedding
+/// (`MemoryRepo::create_category`'s doc comment) since no session prompt
+/// exists yet to seed it from.
+async fn create_category(State(state): State<AppState>, Json(body): Json<CreateCategoryBody>) -> StatusCode {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    let Ok(embedding) = state.ollama.embed(&state.config.embedding_model, name).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    };
+    match state.repo.create_category(name, embedding, crate::now_ms()).await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 #[derive(Deserialize)]
@@ -228,10 +283,13 @@ mod tests {
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
         let claude_dir = tempfile::tempdir().unwrap();
         let claude_projects_dir = claude_dir.path().to_path_buf();
+        let app_dir = tempfile::tempdir().unwrap();
+        let waiting_sessions_path = app_dir.path().join("waiting-sessions.json");
         // Leak the tempdirs so they aren't cleaned up while the server is
         // running for the lifetime of the test.
         std::mem::forget(lance_dir);
         std::mem::forget(claude_dir);
+        std::mem::forget(app_dir);
 
         let state = AppState {
             engine: EngineHandle::spawn(),
@@ -239,6 +297,7 @@ mod tests {
             ollama: Arc::new(FakeOllamaClient::new("Backend / API")),
             config: Arc::new(CategorizationConfig::default()),
             claude_projects_dir,
+            waiting_sessions: Arc::new(Mutex::new(WaitingSessions::load(&waiting_sessions_path))),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -353,7 +412,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let snapshot = state.engine.snapshot().await;
         assert_eq!(snapshot[0].state, crate::state::SessionState::Working);
-        assert_eq!(snapshot[0].task, "Resumed — applying your approval");
+        assert_eq!(snapshot[0].desc, "Resumed — applying your approval");
 
         let resp = client
             .post(format!("{base}/sessions/s1/reply"))
@@ -362,7 +421,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        assert_eq!(state.engine.snapshot().await[0].task, "Working on: please also add tests");
+        assert_eq!(state.engine.snapshot().await[0].desc, "Working on: please also add tests");
 
         let resp = client
             .post(format!("{base}/sessions/s1/recategorize"))
@@ -437,6 +496,56 @@ mod tests {
             .await
             .unwrap();
         assert!(results.is_empty(), "purge(all) should remove every memory row");
+    }
+
+    #[tokio::test]
+    async fn create_category_then_list_categories_returns_it_in_creation_order() {
+        let (base, _state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        let empty: Vec<String> = client.get(format!("{base}/categories")).send().await.unwrap().json().await.unwrap();
+        assert!(empty.is_empty());
+
+        let resp = client
+            .post(format!("{base}/categories"))
+            .json(&serde_json::json!({"name": "Ops / Infra"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Guarantees a distinct `created_at` millisecond from the first
+        // category, so ordering below is asserting real `created_at` sort
+        // behavior rather than incidentally relying on LanceDB's row order.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        // A second category, created after the first, must sort after it —
+        // creation order, not alphabetical (design: new lanes append at the
+        // end of the board).
+        let resp = client
+            .post(format!("{base}/categories"))
+            .json(&serde_json::json!({"name": "Aardvark"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let categories: Vec<String> = client.get(format!("{base}/categories")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(categories, vec!["Ops / Infra".to_string(), "Aardvark".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn create_category_rejects_a_blank_name() {
+        let (base, _state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("{base}/categories"))
+            .json(&serde_json::json!({"name": "   "}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
     }
 
     /// Regression (user report, twice — search for a query as literal as

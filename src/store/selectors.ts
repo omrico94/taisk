@@ -3,7 +3,8 @@ import type { SessionView } from "../types";
 export function matchesQuery(s: SessionView, query: string): boolean {
   if (!query.trim()) return true;
   const q = query.toLowerCase();
-  return `${s.task} ${s.project} ${s.tool} ${s.category}`.toLowerCase().includes(q);
+  const subText = s.subs.map((sub) => `${sub.title} ${sub.desc}`).join(" ");
+  return `${s.title} ${s.desc} ${s.project} ${s.tool} ${s.category} ${subText}`.toLowerCase().includes(q);
 }
 
 export interface CategoryGroup {
@@ -11,21 +12,29 @@ export interface CategoryGroup {
   sessions: SessionView[];
 }
 
-// Real categories are emergent (LLM-assigned), not the prototype's fixed
-// four-category demo list — sorted alphabetically for a stable, simple
-// ordering, with the transient "Uncategorized" placeholder pinned last since
-// it's a loading state, not a real category.
-export function groupByCategory(sessions: SessionView[]): CategoryGroup[] {
+// Lane order follows `knownCategories` (creation order, from `GET
+// /categories` — matches the design's `cats.push(name)`: additive, never
+// resorted) rather than alphabetical. `knownCategories` is the source of
+// truth for which lanes exist at all (Phase 2 §5 — a freshly created
+// category has zero sessions and must still render its own empty lane).
+// Any category present on a session but missing from `knownCategories`
+// (only "Uncategorized", a transient loading placeholder that's never
+// created via `POST /categories`) is appended and pinned last.
+export function groupByCategory(sessions: SessionView[], knownCategories: string[]): CategoryGroup[] {
   const map = new Map<string, SessionView[]>();
   for (const s of sessions) {
     const list = map.get(s.category) ?? [];
     list.push(s);
     map.set(s.category, list);
   }
-  const names = Array.from(map.keys()).sort((a, b) => {
+  const names = [...knownCategories];
+  for (const name of map.keys()) {
+    if (!names.includes(name)) names.push(name);
+  }
+  names.sort((a, b) => {
     if (a === "Uncategorized" && b !== "Uncategorized") return 1;
     if (b === "Uncategorized" && a !== "Uncategorized") return -1;
-    return a.localeCompare(b);
+    return 0; // stable sort: preserve knownCategories' creation order otherwise
   });
-  return names.map((name) => ({ name, sessions: map.get(name)! }));
+  return names.map((name) => ({ name, sessions: map.get(name) ?? [] }));
 }

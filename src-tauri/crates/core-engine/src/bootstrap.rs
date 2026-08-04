@@ -8,12 +8,14 @@
 
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
+
 use crate::api::AppState;
 use crate::categorize::CategorizationConfig;
 use crate::engine::EngineHandle;
 use crate::memory_repo::MemoryRepo;
 use crate::ollama::OllamaClient;
-use crate::orchestrator::{self, OrchestratorConfig};
+use crate::orchestrator::{self, OrchestratorConfig, WaitingSessions};
 
 pub struct BootstrapOptions {
     /// Path to the `hook-bridge` binary to register in
@@ -38,9 +40,20 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
     let engine = EngineHandle::spawn();
     let cat_config = Arc::new(CategorizationConfig::default());
     let orch_config = Arc::new(OrchestratorConfig::default());
+    // Shared with the orchestrator: approve/reject/reply from the board must
+    // evict the same durable "waiting" record a real hook resolution would
+    // (see `AppState::waiting_sessions`'s doc comment).
+    let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
 
     tokio::spawn(crate::engine::run_idle_sweeper(engine.clone(), orch_config.idle_ttl, orch_config.idle_sweep_interval));
-    tokio::spawn(orchestrator::run(engine.clone(), repo.clone(), ollama.clone(), cat_config.clone(), orch_config));
+    tokio::spawn(orchestrator::run(
+        engine.clone(),
+        repo.clone(),
+        ollama.clone(),
+        cat_config.clone(),
+        orch_config,
+        waiting_sessions.clone(),
+    ));
 
     Ok(AppState {
         engine,
@@ -48,5 +61,6 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
         ollama,
         config: cat_config,
         claude_projects_dir: crate::first_run::claude_projects_dir(),
+        waiting_sessions,
     })
 }

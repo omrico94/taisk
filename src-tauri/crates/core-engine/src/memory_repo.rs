@@ -348,6 +348,18 @@ impl MemoryRepo {
         Ok(())
     }
 
+    /// Creates a new, empty category (Phase 2 §5 — user-created categories
+    /// via the board's "+ New category" control). There's no session prompt
+    /// to seed the exemplar from yet, so the category name's own embedding
+    /// is used as the placeholder — the same `upsert_exemplar` mechanism
+    /// every other category's exemplar goes through, just seeded
+    /// differently. A later real session dropped into this lane recategorizes
+    /// exactly like any other manual override; the exemplar isn't refined
+    /// further here.
+    pub async fn create_category(&self, name: &str, embedding: Vec<f32>, created_at: i64) -> lancedb::Result<()> {
+        self.upsert_exemplar(&Exemplar { category: name.to_string(), exemplar_embedding: embedding, created_at }).await
+    }
+
     /// Nearest category exemplar to `embedding` by cosine distance, if any
     /// exemplars exist yet. The caller (categorization pipeline, plan §5)
     /// applies the configurable similarity threshold to this result.
@@ -586,6 +598,26 @@ mod tests {
             .unwrap();
         assert_eq!(cat, "Frontend");
         assert!(dist < 0.01);
+    }
+
+    #[tokio::test]
+    async fn create_category_seeds_an_exemplar_findable_via_list_and_nearest() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = MemoryRepo::open(dir.path().to_str().unwrap()).await.unwrap();
+
+        repo.create_category("Ops / Infra", vec_of(EMBEDDING_DIM, 1.0), 42).await.unwrap();
+
+        let exemplars = repo.list_exemplars().await.unwrap();
+        assert_eq!(exemplars.len(), 1);
+        assert_eq!(exemplars[0].category, "Ops / Infra");
+        assert_eq!(exemplars[0].created_at, 42);
+
+        // A brand-new empty category must be reachable the same way any
+        // other category's exemplar is — a manual recategorize into it is
+        // just `POST /sessions/:id/recategorize`, but the lane itself has to
+        // exist first via this seeded exemplar.
+        let (cat, _) = repo.nearest_category(&vec_of(EMBEDDING_DIM, 1.0)).await.unwrap().unwrap();
+        assert_eq!(cat, "Ops / Infra");
     }
 
     #[tokio::test]

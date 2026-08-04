@@ -28,6 +28,7 @@
   --text-muted-alt: #7a8194;
   --text-faint: #6b7185;
   --text-divider-dim: #454b5c;
+  --text-desc: #98a0b3;
 
   /* State colors */
   --state-working: #38bdf8;
@@ -36,6 +37,16 @@
   --state-waiting-glow: rgba(251, 191, 36, 0.55);
   --state-idle: #64748b;
   --state-done: #34d399;
+  /* Context-window bar's >=90% urgency color (Phase 2) — distinct from every
+     other state color, since it's a fill-ratio warning, not a session state. */
+  --state-danger: #f87171;
+  /* Light-cyan accent text — cost badges, "Ask memory" label, relevance
+     badges: anywhere the design uses this specific lighter cyan for text
+     rather than the base --state-working cyan used for dots/fills. */
+  --accent-cyan-light: #8fd6ff;
+  /* Plan chip/panel accent (Phase 2) — distinct violet used only for the
+     linked-execution-plan chip, progress bar, and checklist. */
+  --accent-violet: #b39dff;
 
   /* Tool colors */
   --tool-claude-code: #d98a6a;

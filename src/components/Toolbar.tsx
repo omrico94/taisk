@@ -3,6 +3,7 @@ import { useShallow } from "zustand/react/shallow";
 import { SearchField } from "./SearchField";
 import { AskMemoryButton } from "./AskMemoryButton";
 import { StatusPill } from "./StatusPill";
+import { Logo } from "./Logo";
 import styles from "./Toolbar.module.css";
 
 export function Toolbar() {
@@ -18,6 +19,7 @@ export function Toolbar() {
 
   return (
     <div className={styles.toolbar}>
+      <Logo />
       <SearchField value={query} onChange={setQuery} />
       <AskMemoryButton onClick={() => setAskOpen(true)} />
       <span className={styles.spacer} />

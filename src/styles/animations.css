@@ -16,3 +16,11 @@
   0%, 100% { box-shadow: 0 0 0 1px var(--w), 0 6px 26px -12px var(--w); }
   50% { box-shadow: 0 0 0 1px var(--w), 0 12px 44px -6px var(--w); }
 }
+
+/* Logo mark's orbiting comet trail — a stroke-dashoffset sweep around the
+   ring path (see Logo.tsx), matched in duration to the SMIL animateMotion
+   moving the comet dot along the same path, so the dot always leads its own
+   trail rather than the two drifting apart. */
+@keyframes orbitTrail {
+  to { stroke-dashoffset: -964.4; }
+}

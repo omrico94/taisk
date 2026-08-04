@@ -51,6 +51,13 @@ struct CategorizeResponse {
     is_new: bool,
     #[serde(default)]
     task_summary: String,
+    /// Short, stable session name (Phase 2 design change) — set once here,
+    /// never refreshed by `refresh_task_summary`. `#[serde(default)]` so
+    /// callers (and every existing test's `FakeOllamaClient` response) that
+    /// predate this field still parse fine; an empty result falls back to
+    /// the first few words of the prompt itself (see `categorize_session`).
+    #[serde(default)]
+    title: String,
 }
 
 /// Small local instruct models routinely wrap JSON in prose or markdown
@@ -72,11 +79,13 @@ fn categorize_prompt(existing_categories: &[String], task: &str, min_confidence_
     format!(
         "Existing categories: {categories_list}\n\n\
          Task: \"{task}\"\n\n\
-         Pick the single best-fitting existing category for this task, and also write a short current-task summary \
-         (under 12 words) describing what this task is about. If none of the existing categories fit well \
+         Pick the single best-fitting existing category for this task, write a short current-task summary \
+         (under 12 words) describing what this task is about, and also write a short, stable title for this \
+         session (4 words or fewer, e.g. \"Auth middleware refactor\") that will keep making sense even after \
+         the task summary changes. If none of the existing categories fit well \
          (less than {min_confidence_percent}% confident), invent a new short category name (1-3 words) instead.\n\n\
          Respond with ONLY a JSON object, no other text, in exactly this shape: \
-         {{\"category\": \"<name>\", \"confidence\": <0-100 integer>, \"is_new\": <true|false>, \"task_summary\": \"<short summary>\"}}"
+         {{\"category\": \"<name>\", \"confidence\": <0-100 integer>, \"is_new\": <true|false>, \"task_summary\": \"<short summary>\", \"title\": \"<short title>\"}}"
     )
 }
 
@@ -104,7 +113,7 @@ pub async fn categorize_session(
         .generate(&config.instruct_model, &categorize_prompt(&existing_categories, prompt, config.min_confidence_percent))
         .await?;
 
-    let (category, task_summary) = match parse_llm_json(&raw) {
+    let (category, task_summary, title) = match parse_llm_json(&raw) {
         // Model claims a confident match against a category that genuinely
         // exists in our list — join it. A claimed match against a name that
         // *isn't* actually in the list (small models sometimes rephrase) is
@@ -114,21 +123,30 @@ pub async fn categorize_session(
                 && resp.confidence >= config.min_confidence_percent
                 && existing_categories.iter().any(|c| c == &resp.category) =>
         {
-            (resp.category, resp.task_summary)
+            (resp.category, resp.task_summary, resp.title)
         }
         Some(resp) => {
             let label = if resp.category.trim().is_empty() { "General".to_string() } else { resp.category.trim().to_string() };
             let _ = repo
                 .upsert_exemplar(&Exemplar { category: label.clone(), exemplar_embedding: embedding.clone(), created_at: crate::now_ms() })
                 .await;
-            (label, resp.task_summary)
+            (label, resp.task_summary, resp.title)
         }
         // Model didn't return parseable JSON — degrade gracefully rather
         // than fail the whole pipeline over a formatting slip.
-        None => ("General".to_string(), String::new()),
+        None => ("General".to_string(), String::new(), String::new()),
     };
 
     let task_summary = if task_summary.trim().is_empty() { prompt.chars().take(80).collect() } else { task_summary.trim().to_string() };
+    // The model's own title, or — if it didn't provide one (including every
+    // pre-title-field `FakeOllamaClient` response in the existing test
+    // suite) — a deterministic fallback: the prompt's first few words. Not
+    // as good as a real summarizing title, but never blank.
+    let title = if title.trim().is_empty() {
+        prompt.split_whitespace().take(4).collect::<Vec<_>>().join(" ")
+    } else {
+        title.trim().to_string()
+    };
 
     let _ = repo
         .upsert_memory(&Memory {
@@ -146,7 +164,8 @@ pub async fn categorize_session(
         .await;
 
     engine.dispatch(EngineCommand::SetCategory { id: session_id.to_string(), category: category.clone() }).await;
-    engine.dispatch(EngineCommand::SetTask { id: session_id.to_string(), task: task_summary }).await;
+    engine.dispatch(EngineCommand::SetTitle { id: session_id.to_string(), title }).await;
+    engine.dispatch(EngineCommand::SetDesc { id: session_id.to_string(), desc: task_summary }).await;
 
     Ok(category)
 }
@@ -169,7 +188,7 @@ pub async fn refresh_task_summary(
     if let Ok(raw) = ollama.generate(&config.instruct_model, &prompt).await {
         let summary = raw.trim();
         if !summary.is_empty() {
-            engine.dispatch(EngineCommand::SetTask { id: session_id.to_string(), task: summary.to_string() }).await;
+            engine.dispatch(EngineCommand::SetDesc { id: session_id.to_string(), desc: summary.to_string() }).await;
         }
     }
 }
@@ -265,15 +284,21 @@ mod fixture_harness {
         assert_eq!(categorized.id, session_id);
         assert_eq!(categorized.category, "Backend / API");
 
-        // Third diff: the task summary update.
-        let SessionDiff::Upserted(with_task) = diffs.recv().await.unwrap() else { panic!() };
-        assert_eq!(with_task.task, "Refactoring auth middleware");
+        // Third diff: the title (set once, from the prompt's first few words
+        // here since `new_categorizing`'s canned response predates the
+        // title field).
+        let SessionDiff::Upserted(with_title) = diffs.recv().await.unwrap() else { panic!() };
+        assert_eq!(with_title.title, "Refactor auth middleware to");
+
+        // Fourth diff: the desc (current-task summary) update.
+        let SessionDiff::Upserted(with_desc) = diffs.recv().await.unwrap() else { panic!() };
+        assert_eq!(with_desc.desc, "Refactoring auth middleware");
 
         // And the final engine state (independent of the diff stream) agrees.
         let snapshot = engine.snapshot().await;
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].category, "Backend / API");
-        assert_eq!(snapshot[0].task, "Refactoring auth middleware");
+        assert_eq!(snapshot[0].desc, "Refactoring auth middleware");
 
         // The category exemplar was persisted (new-category branch), so a
         // second, similar session would be able to join it.

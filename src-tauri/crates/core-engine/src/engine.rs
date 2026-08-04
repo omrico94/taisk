@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::collector::SubagentInfo;
 use crate::state::{self, SessionEvent, SessionState};
 
 pub type SessionId = String;
@@ -30,17 +31,65 @@ pub struct SessionView {
     pub entrypoint: String,
     pub category: String,
     pub state: SessionState,
-    pub task: String,
+    /// Short, stable name for the session (e.g. "Auth middleware refactor"),
+    /// set once at categorization time and never refreshed after — distinct
+    /// from `desc`, which is the live, changing "what's happening right
+    /// now" line (Phase 2 design change: this used to be a single `task`
+    /// field before the title/description split).
+    pub title: String,
+    pub desc: String,
     pub started_at_ms: i64,
+    /// Real cumulative token/cost/context-window figures parsed from the
+    /// transcript's own `usage` objects (Phase 2 design change — see
+    /// `collector::extract_usage_metrics`). `ctx_max` is 0 until the first
+    /// real assistant turn with usage data has been seen — the frontend
+    /// treats that as "no metrics yet" rather than rendering a bogus 0%
+    /// full bar.
+    pub tokens: i64,
+    pub cost: f64,
+    pub ctx_used: i64,
+    pub ctx_max: i64,
+    /// Subagents spawned by this session (Phase 2 design change), re-derived
+    /// wholesale on every `"stop"` hook from `collector::list_subagents` —
+    /// never mutated in place. Empty for the overwhelming majority of
+    /// sessions that never spawn one.
+    #[serde(default)]
+    pub subs: Vec<SubagentInfo>,
+    /// Real task-tracking data (Phase 2 design change) for sessions that
+    /// used `TaskCreate`/`TaskUpdate` — absence (`None`) is the normal case,
+    /// not an error; most sessions never create tracked tasks.
+    #[serde(default)]
+    pub plan: Option<PlanView>,
     /// Last time a real hook/user-activity event touched this session.
-    /// Drives the idle sweep (`EngineCommand::SweepIdle`): a session with no
-    /// activity for longer than the configured TTL is presumed abandoned
-    /// (terminal closed, process killed — anything that never gets to fire
-    /// a clean `SessionEnd`) and moved to `Idle` rather than sitting at
-    /// `Working` forever. Not serialized to the frontend — it's purely an
+    /// Drives the idle sweep (`EngineCommand::SweepIdle`): a `Working`
+    /// session with no activity for longer than the configured TTL is
+    /// presumed abandoned (terminal closed, process killed — anything that
+    /// never gets to fire a clean `TurnEnd`/`SessionEnd`) and moved to
+    /// `Done` rather than sitting at `Working` forever. Also used by
+    /// `orchestrator`'s separate done-sweeper to age a quiet `Done` session
+    /// into `Idle`. Not serialized to the frontend — it's purely an
     /// engine-internal bookkeeping field.
     #[serde(skip)]
     pub last_activity_ms: i64,
+}
+
+/// A single tracked step from `~/.claude/tasks/<session_id>/*.json`
+/// (Phase 2 design change — real `TaskCreate`/`TaskUpdate` data, not the
+/// deprecated `TodoWrite`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub id: String,
+    pub subject: String,
+    pub done: bool,
+}
+
+/// A session's linked execution plan — present only for sessions that
+/// actually used `TaskCreate`, which is most sessions' normal case of
+/// having none at all (see `SessionView::plan`'s doc comment).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanView {
+    pub title: String,
+    pub steps: Vec<PlanStep>,
 }
 
 impl SessionView {
@@ -53,8 +102,15 @@ impl SessionView {
             entrypoint,
             category: "Uncategorized".to_string(),
             state: SessionState::Working,
-            task: "Starting…".to_string(),
+            title: "Starting…".to_string(),
+            desc: "Starting…".to_string(),
             started_at_ms,
+            tokens: 0,
+            cost: 0.0,
+            ctx_used: 0,
+            ctx_max: 0,
+            subs: Vec::new(),
+            plan: None,
             last_activity_ms: crate::now_ms(),
         }
     }
@@ -79,15 +135,42 @@ pub enum EngineCommand {
         started_at_ms: Option<i64>,
     },
     SetCategory { id: SessionId, category: String },
-    SetTask { id: SessionId, task: String },
+    /// Set once, at categorization time — see `SessionView::title`'s doc
+    /// comment for why this is separate from `SetDesc`.
+    SetTitle { id: SessionId, title: String },
+    SetDesc { id: SessionId, desc: String },
+    /// Real usage-derived metrics (`collector::extract_usage_metrics`),
+    /// re-sent wholesale on every refresh rather than incrementally updated.
+    SetMetrics { id: SessionId, tokens: i64, cost: f64, ctx_used: i64, ctx_max: i64 },
+    /// Re-derived wholesale on every `"stop"` hook from
+    /// `collector::list_subagents` — replaces the entire vec rather than
+    /// patching individual entries.
+    SetSubagents { id: SessionId, subs: Vec<SubagentInfo> },
+    /// Re-derived wholesale on every `"stop"` hook from the real
+    /// `~/.claude/tasks/` files. `None` is the normal case for a session
+    /// that never used `TaskCreate`.
+    SetPlan { id: SessionId, plan: Option<PlanView> },
+    /// Corrects `last_activity_ms` after the fact — used only by
+    /// reconstruction on startup, which otherwise has `SessionEvent`
+    /// unconditionally stamp it with "now" (right, for a live hook; wrong
+    /// for a replayed historical event, which would reset a genuinely stale
+    /// session's idle clock and make the sweep wait a full fresh `idle_ttl`
+    /// after every restart before correcting a "Working" ghost that hasn't
+    /// actually been touched in hours). Bookkeeping-only: no diff broadcast,
+    /// since the field is `#[serde(skip)]` and invisible to the frontend.
+    SetLastActivity { id: SessionId, last_activity_ms: i64 },
     /// Approve/Reject/Send from the drawer (plan §7) — resolves a Waiting
-    /// session back to Working with an updated task line.
-    ResolveWaiting { id: SessionId, task: String },
+    /// session back to Working with an updated desc line.
+    ResolveWaiting { id: SessionId, desc: String },
     Recategorize { id: SessionId, category: String },
     /// Periodic tick (see `run_idle_sweeper`): any session still `Working`
-    /// with no activity for at least `ttl_ms` is presumed abandoned and
-    /// moved to `Idle`. Sessions that are `Waiting` (genuinely blocked on
-    /// the user, not abandoned) or already `Done`/`Idle` are left alone.
+    /// with no activity for at least `ttl_ms` is presumed to have stopped
+    /// (crashed/closed without a clean `TurnEnd`/`SessionEnd`) and moved to
+    /// `Done`. Sessions that are `Waiting` (genuinely blocked on the user,
+    /// not abandoned) or already `Done`/`Idle` are left alone — aging a
+    /// quiet `Done` session into `Idle` is a separate sweep, in
+    /// `orchestrator.rs`, since it needs `EndedSessions` to exempt
+    /// explicitly-closed sessions.
     SweepIdle { now_ms: i64, ttl_ms: i64 },
     Snapshot { respond_to: oneshot::Sender<Vec<SessionView>> },
 }
@@ -151,16 +234,48 @@ impl EngineHandle {
                             let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
                         }
                     }
-                    EngineCommand::SetTask { id, task } => {
+                    EngineCommand::SetTitle { id, title } => {
                         if let Some(view) = sessions.get_mut(&id) {
-                            view.task = task;
+                            view.title = title;
                             let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
                         }
                     }
-                    EngineCommand::ResolveWaiting { id, task } => {
+                    EngineCommand::SetDesc { id, desc } => {
+                        if let Some(view) = sessions.get_mut(&id) {
+                            view.desc = desc;
+                            let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
+                        }
+                    }
+                    EngineCommand::SetMetrics { id, tokens, cost, ctx_used, ctx_max } => {
+                        if let Some(view) = sessions.get_mut(&id) {
+                            view.tokens = tokens;
+                            view.cost = cost;
+                            view.ctx_used = ctx_used;
+                            view.ctx_max = ctx_max;
+                            let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
+                        }
+                    }
+                    EngineCommand::SetSubagents { id, subs } => {
+                        if let Some(view) = sessions.get_mut(&id) {
+                            view.subs = subs;
+                            let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
+                        }
+                    }
+                    EngineCommand::SetPlan { id, plan } => {
+                        if let Some(view) = sessions.get_mut(&id) {
+                            view.plan = plan;
+                            let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
+                        }
+                    }
+                    EngineCommand::SetLastActivity { id, last_activity_ms } => {
+                        if let Some(view) = sessions.get_mut(&id) {
+                            view.last_activity_ms = last_activity_ms;
+                        }
+                    }
+                    EngineCommand::ResolveWaiting { id, desc } => {
                         if let Some(view) = sessions.get_mut(&id) {
                             view.state = state::transition(view.state, SessionEvent::UserReply);
-                            view.task = task;
+                            view.desc = desc;
                             view.last_activity_ms = crate::now_ms();
                             let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
                         }
@@ -205,11 +320,12 @@ impl EngineHandle {
 }
 
 /// Background loop: every `interval`, sweeps for `Working` sessions that have
-/// had no hook activity for at least `ttl` and moves them to `Idle` (see
+/// had no hook activity for at least `ttl` and moves them to `Done` (see
 /// `EngineCommand::SweepIdle`). Started once from `bootstrap::start` and runs
 /// for the lifetime of the app — this is what catches a session whose
 /// process was killed or window closed without ever firing a clean
-/// `SessionEnd` (a hook is cooperative; nothing fires it for you).
+/// `TurnEnd`/`SessionEnd` (a hook is cooperative; nothing fires it for you).
+/// The separate `Done` -> `Idle` aging sweep lives in `orchestrator.rs`.
 pub async fn run_idle_sweeper(engine: EngineHandle, ttl: std::time::Duration, interval: std::time::Duration) {
     let ttl_ms = ttl.as_millis() as i64;
     loop {
@@ -347,18 +463,22 @@ mod tests {
         assert_eq!(engine.snapshot().await[0].state, SessionState::Waiting);
 
         engine
-            .dispatch(EngineCommand::ResolveWaiting { id: "s1".into(), task: "Resumed".into() })
+            .dispatch(EngineCommand::ResolveWaiting { id: "s1".into(), desc: "Resumed".into() })
             .await;
         let snapshot = engine.snapshot().await;
         assert_eq!(snapshot[0].state, SessionState::Working);
-        assert_eq!(snapshot[0].task, "Resumed");
+        assert_eq!(snapshot[0].desc, "Resumed");
     }
 
     /// A session that's gone quiet (no hook activity) for longer than the
-    /// TTL is presumed abandoned and moved to Idle — this is what catches a
-    /// closed terminal/killed process that never fires `SessionEnd`.
+    /// TTL is presumed abandoned and moved to Done — the crash-safety
+    /// fallback for a closed terminal/killed process that never fires a
+    /// clean `TurnEnd`/`SessionEnd` (see `state::transition`'s doc comment:
+    /// `Working` + `IdleTimeout` now means "presumably stopped working",
+    /// same conclusion a clean `Stop` hook would reach, just detected by
+    /// silence instead).
     #[tokio::test]
-    async fn sweep_idle_moves_a_stale_working_session_to_idle() {
+    async fn sweep_idle_moves_a_stale_working_session_to_done() {
         let engine = EngineHandle::spawn();
         engine
             .dispatch(EngineCommand::SessionEvent {
@@ -382,7 +502,7 @@ mod tests {
 
         // Stale: TTL has elapsed with no activity in between.
         engine.dispatch(EngineCommand::SweepIdle { now_ms: started + 20_000, ttl_ms: 10_000 }).await;
-        assert_eq!(engine.snapshot().await[0].state, SessionState::Idle);
+        assert_eq!(engine.snapshot().await[0].state, SessionState::Done);
     }
 
     /// A Waiting session (genuinely blocked on the user, not abandoned) must
@@ -416,11 +536,12 @@ mod tests {
         assert_eq!(engine.snapshot().await[0].state, SessionState::Waiting);
     }
 
-    /// Activity (a real hook event) after a session has already gone Idle
-    /// must bring it back to Working, same as any other state per the
-    /// transition table — the sweep isn't a one-way door.
+    /// Activity (a real hook event) after a session has already gone Done
+    /// (via the idle-sweep safety net) must bring it back to Working, same
+    /// as any other state per the transition table — the sweep isn't a
+    /// one-way door.
     #[tokio::test]
-    async fn activity_after_idle_returns_to_working() {
+    async fn activity_after_done_returns_to_working() {
         let engine = EngineHandle::spawn();
         engine
             .dispatch(EngineCommand::SessionEvent {
@@ -433,7 +554,7 @@ mod tests {
             })
             .await;
         engine.dispatch(EngineCommand::SweepIdle { now_ms: crate::now_ms() + 999_999_999, ttl_ms: 10_000 }).await;
-        assert_eq!(engine.snapshot().await[0].state, SessionState::Idle);
+        assert_eq!(engine.snapshot().await[0].state, SessionState::Done);
 
         engine
             .dispatch(EngineCommand::SessionEvent {
@@ -480,5 +601,42 @@ mod tests {
         let snapshot = engine.snapshot().await;
         let s2 = snapshot.iter().find(|v| v.id == "s2").unwrap();
         assert_eq!(s2.entrypoint, "claude-desktop");
+    }
+
+    #[tokio::test]
+    async fn set_subagents_replaces_the_whole_vec_and_set_plan_replaces_the_option() {
+        let engine = EngineHandle::spawn();
+        engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "s1".into(),
+                event: SessionEvent::SessionStart,
+                project: None,
+                cwd: None,
+                entrypoint: None,
+                started_at_ms: None,
+            })
+            .await;
+        assert!(engine.snapshot().await[0].subs.is_empty());
+        assert!(engine.snapshot().await[0].plan.is_none());
+
+        let sub = SubagentInfo {
+            id: "agent-1".into(),
+            title: "Fix flaky test".into(),
+            desc: "Investigating retries".into(),
+            state: "Working".into(),
+            tokens: 100,
+            cost: 0.01,
+            ctx_used: 500,
+            ctx_max: 1_000_000,
+        };
+        engine.dispatch(EngineCommand::SetSubagents { id: "s1".into(), subs: vec![sub.clone()] }).await;
+        assert_eq!(engine.snapshot().await[0].subs, vec![sub]);
+
+        let plan = PlanView {
+            title: "Backend / API plan".into(),
+            steps: vec![PlanStep { id: "1".into(), subject: "Do the thing".into(), done: true }],
+        };
+        engine.dispatch(EngineCommand::SetPlan { id: "s1".into(), plan: Some(plan.clone()) }).await;
+        assert_eq!(engine.snapshot().await[0].plan, Some(plan));
     }
 }

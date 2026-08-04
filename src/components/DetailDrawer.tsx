@@ -3,8 +3,19 @@ import { motion } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { useShallow } from "zustand/react/shallow";
 import { useSessionStore } from "../store/sessionStore";
+import type { SessionState } from "../types";
 import { approveSession, getTranscript, recategorizeSession, rejectSession, replySession, type TranscriptRow } from "../api";
-import { STATE_COLOR_VAR, STATE_LABEL, formatElapsed, toolColorVar } from "../styles/sessionStyle";
+import {
+  STATE_COLOR_VAR,
+  STATE_LABEL,
+  ctxColor,
+  ctxPercent,
+  fmtCost,
+  fmtTokens,
+  formatElapsed,
+  planPercent,
+  toolColorVar,
+} from "../styles/sessionStyle";
 import styles from "./DetailDrawer.module.css";
 
 // Matches the design's `slideIn` spec exactly (.42s cubic-bezier(.22,1,.36,1)
@@ -58,6 +69,8 @@ export function DetailDrawer({ nowMs }: Props) {
 
   const color = STATE_COLOR_VAR[session.state];
   const isWaiting = session.state === "Waiting";
+  const planDone = session.plan?.steps.filter((s) => s.done).length ?? 0;
+  const planTotal = session.plan?.steps.length ?? 0;
 
   // These fire the real API calls (M10); the resulting state change comes
   // back authoritatively over the WS diff stream, not a local mutation —
@@ -122,8 +135,113 @@ export function DetailDrawer({ nowMs }: Props) {
           <span style={{ color: toolColorVar(session.tool), fontSize: "10.5px", fontWeight: 600 }}>{session.tool}</span>
           <span className={styles.projectName}>{session.project}</span>
         </div>
-        <div className={styles.taskLine}>{session.task}</div>
+        <div className={styles.titleLine}>{session.title}</div>
+        <div className={styles.descLine}>{session.desc}</div>
       </div>
+
+      {session.ctx_max > 0 && (
+        <div className={styles.statBlock}>
+          <div className={styles.statPair}>
+            <div className={styles.statCol}>
+              <span className={styles.statLabel}>Tokens</span>
+              <span className={styles.statValue}>{fmtTokens(session.tokens)}</span>
+            </div>
+            <div className={styles.statDivider} />
+            <div className={styles.statCol}>
+              <span className={styles.statLabel}>Cost</span>
+              <span className={`${styles.statValue} ${styles.statValueCyan}`}>{fmtCost(session.cost)}</span>
+            </div>
+          </div>
+          <div className={styles.ctxBlock}>
+            <div className={styles.ctxHeaderRow}>
+              <span className={styles.statLabel}>Context window</span>
+              <span className={styles.spacer} />
+              <span className={styles.ctxUsedLabel}>
+                {fmtTokens(session.ctx_used)} / {fmtTokens(session.ctx_max)}
+              </span>
+            </div>
+            <div className={styles.ctxBarRow}>
+              <div className={styles.ctxTrack}>
+                <div
+                  className={styles.ctxFill}
+                  style={{
+                    width: `${ctxPercent(session.ctx_used, session.ctx_max)}%`,
+                    background: ctxColor(ctxPercent(session.ctx_used, session.ctx_max)),
+                  }}
+                />
+              </div>
+              <span className={styles.ctxPct} style={{ color: ctxColor(ctxPercent(session.ctx_used, session.ctx_max)) }}>
+                {ctxPercent(session.ctx_used, session.ctx_max)}%
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {session.subs.length > 0 && (
+        <div className={styles.subsSection}>
+          <div className={styles.subsSectionLabel}>
+            <span className={styles.subsSectionGlyph}>⤷</span>
+            {session.subs.length} {session.subs.length === 1 ? "subagent" : "subagents"}
+          </div>
+          <div className={styles.subWrap}>
+            {session.subs.map((sub) => {
+              const subState = sub.state as SessionState;
+              const subColor = STATE_COLOR_VAR[subState];
+              return (
+                <div className={styles.subRow} key={sub.id}>
+                  <span className={styles.subConnector} />
+                  <div className={styles.subCard} style={{ opacity: sub.state === "Done" ? 0.72 : 1 }}>
+                    <div className={styles.identityRow}>
+                      <span
+                        className={`${styles.subDot} ${sub.state === "Working" ? styles.subDotWorking : ""}`}
+                        style={{ background: subColor }}
+                      />
+                      <span className={styles.subTitle}>{sub.title}</span>
+                      <span className={styles.spacer} />
+                      <span className={styles.subStateLabel} style={{ color: subColor }}>
+                        {STATE_LABEL[subState]}
+                      </span>
+                    </div>
+                    <div className={styles.subDesc}>{sub.desc}</div>
+                    {sub.ctx_max > 0 && (
+                      <div className={styles.subMetricsRow}>
+                        <span className={styles.subTokens}>◇ {fmtTokens(sub.tokens)}</span>
+                        <span className={styles.subCost}>{fmtCost(sub.cost)}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {session.plan && (
+        <div className={styles.planPanel}>
+          <div className={styles.planHeaderRow}>
+            <span className={styles.planGlyph}>◧</span>
+            <span className={styles.planTitle}>{session.plan.title}</span>
+          </div>
+          <div className={styles.planProgressRow}>
+            <div className={styles.planTrack}>
+              <div className={styles.planFill} style={{ width: `${planPercent(planDone, planTotal)}%` }} />
+            </div>
+            <span className={styles.planLabel}>
+              {planDone}/{planTotal}
+            </span>
+          </div>
+          <div className={styles.planSteps}>
+            {session.plan.steps.map((step) => (
+              <div className={styles.planStepRow} key={step.id}>
+                <span className={`${styles.planMark} ${step.done ? styles.planMarkDone : ""}`}>{step.done ? "✓" : ""}</span>
+                <span className={`${styles.planStepText} ${step.done ? styles.planStepTextDone : ""}`}>{step.subject}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className={styles.memoryChip}>
         <span className={styles.memoryChipIcon}>✦</span>

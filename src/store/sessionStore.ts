@@ -10,6 +10,15 @@ interface SessionStoreState {
   replyText: string;
   askResults: SearchResult[];
   collapsedCategories: Set<string>;
+  /** Per-session subagent-tree collapse state (design: default expanded). */
+  collapsedSubs: Set<string>;
+  /** Known categories in creation order (from `GET /categories`) — drives
+   * lane order/empty-lane rendering, distinct from `sessions`' own
+   * `.category` field which only reflects categories that have ≥1 session. */
+  categories: string[];
+  /** Set while a lane is a drop target during a drag — used to render the
+   * hot-lane highlight; not persisted, purely transient UI state. */
+  dragOverCategory: string | null;
 
   setSessions: (sessions: SessionView[]) => void;
   upsertSession: (s: SessionView) => void;
@@ -23,6 +32,11 @@ interface SessionStoreState {
   setReplyText: (t: string) => void;
   setAskResults: (r: SearchResult[]) => void;
   toggleCategoryCollapsed: (name: string) => void;
+  toggleSubsCollapsed: (sessionId: string) => void;
+  setCategories: (categories: string[]) => void;
+  /** Appends locally after a successful `POST /categories` — no need to refetch. */
+  addCategory: (name: string) => void;
+  setDragOverCategory: (name: string | null) => void;
 }
 
 export const useSessionStore = create<SessionStoreState>((set) => ({
@@ -34,6 +48,9 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   replyText: "",
   askResults: [],
   collapsedCategories: new Set(),
+  collapsedSubs: new Set(),
+  categories: [],
+  dragOverCategory: null,
 
   setSessions: (sessions) => set({ sessions: Object.fromEntries(sessions.map((s) => [s.id, s])) }),
   upsertSession: (s) => set((state) => ({ sessions: { ...state.sessions, [s.id]: s } })),
@@ -57,4 +74,15 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
       else next.add(name);
       return { collapsedCategories: next };
     }),
+  toggleSubsCollapsed: (sessionId) =>
+    set((state) => {
+      const next = new Set(state.collapsedSubs);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return { collapsedSubs: next };
+    }),
+  setCategories: (categories) => set({ categories }),
+  addCategory: (name) =>
+    set((state) => (state.categories.includes(name) ? state : { categories: [...state.categories, name] })),
+  setDragOverCategory: (dragOverCategory) => set({ dragOverCategory }),
 }));

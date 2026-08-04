@@ -12,8 +12,44 @@ export interface SessionView {
   entrypoint: string;
   category: string;
   state: SessionState;
-  task: string;
+  /** Short, stable session name — set once at categorization time. */
+  title: string;
+  /** Live, changing "what's happening right now" line (was `task` in Phase 1). */
+  desc: string;
   started_at_ms: number;
+  /** Real cumulative usage figures. `ctx_max === 0` means no metrics yet
+   * (too early in the session — nothing to render). */
+  tokens: number;
+  cost: number;
+  ctx_used: number;
+  ctx_max: number;
+  /** Subagents spawned by this session — empty for the common case. */
+  subs: SubagentView[];
+  /** Real `~/.claude/tasks/` data — absent for sessions that never used TaskCreate. */
+  plan: PlanView | null;
+}
+
+export interface SubagentView {
+  id: string;
+  title: string;
+  desc: string;
+  /** `"Working"` or `"Done"` — a file-mtime heuristic, not a hook-driven guarantee. */
+  state: string;
+  tokens: number;
+  cost: number;
+  ctx_used: number;
+  ctx_max: number;
+}
+
+export interface PlanStep {
+  id: string;
+  subject: string;
+  done: boolean;
+}
+
+export interface PlanView {
+  title: string;
+  steps: PlanStep[];
 }
 
 export type SessionDiff = { Upserted: SessionView } | { Removed: string };

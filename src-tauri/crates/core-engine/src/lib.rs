@@ -11,6 +11,7 @@ pub mod hook_socket;
 pub mod memory_repo;
 pub mod ollama;
 pub mod orchestrator;
+pub mod plan;
 pub mod settings_merge;
 pub mod state;
 

@@ -45,6 +45,23 @@ export async function recategorizeSession(id: string, category: string): Promise
   });
 }
 
+export async function getCategories(): Promise<string[]> {
+  const resp = await fetch(`${API_BASE}/categories`);
+  return resp.json();
+}
+
+/** Throws on a rejected (e.g. blank-name) request so callers can surface it. */
+export async function createCategory(name: string): Promise<void> {
+  const resp = await fetch(`${API_BASE}/categories`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to create category "${name}" (${resp.status})`);
+  }
+}
+
 export async function search(query: string): Promise<SearchResult[]> {
   const resp = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}`);
   return resp.json();

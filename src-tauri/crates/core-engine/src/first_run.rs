@@ -59,6 +59,14 @@ pub fn claude_projects_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".claude").join("projects")
 }
 
+/// `~/.claude/tasks` — real `TaskCreate`/`TaskUpdate` data, one JSON file per
+/// task under a `<session_id>/` subdirectory (Phase 2 plan §4; confirmed
+/// against this project's own build tracking — the deprecated `TodoWrite`
+/// mechanism has no on-disk equivalent).
+pub fn claude_tasks_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_default().join(".claude").join("tasks")
+}
+
 /// Registers our hook entries into `~/.claude/settings.json`, idempotently
 /// (plan §3). Returns the path actually written, for logging/diagnostics.
 pub fn register_hooks(hook_bridge_path: &str) -> std::io::Result<PathBuf> {

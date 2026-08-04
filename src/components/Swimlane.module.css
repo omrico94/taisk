@@ -2,6 +2,22 @@
   display: flex;
   gap: 18px;
   align-items: flex-start;
+  /* padding + negative margin: the drop-target highlight (Phase 2 §5) grows
+     into this padding rather than shifting surrounding layout when a lane
+     becomes a hot drop target. */
+  padding: 8px;
+  margin: -8px;
+  border-radius: 16px;
+  background: transparent;
+  box-shadow: inset 0 0 0 0 transparent;
+  transition:
+    background 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.laneHot {
+  background: rgba(56, 189, 248, 0.08);
+  box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.45);
 }
 
 .labelCol {
@@ -45,6 +61,28 @@
 .cards {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-start;
   gap: var(--gap-card-wrap);
   flex: 1;
+}
+
+.emptyHint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 70px;
+  min-width: 240px;
+  border-radius: 14px;
+  border: 1.5px dashed var(--border-10);
+  color: var(--text-faint);
+  font-size: 12.5px;
+  flex: 1;
+  transition:
+    border-color 0.25s ease,
+    color 0.25s ease;
+}
+
+.emptyHintHot {
+  border-color: rgba(56, 189, 248, 0.5);
+  color: var(--accent-cyan-light);
 }
