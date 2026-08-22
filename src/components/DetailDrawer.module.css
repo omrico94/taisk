@@ -58,6 +58,55 @@
   line-height: 1;
 }
 
+.deleteButton {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.18);
+  color: #f87171;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.deleteButton:hover {
+  background: rgba(248, 113, 113, 0.16);
+}
+
+/* Armed (first click) state: widens into an explicit "Confirm delete" label
+   instead of relying on window.confirm(), which Tauri's WebView doesn't
+   reliably show — see DetailDrawer.tsx's `confirmingDelete` doc comment. */
+.deleteButtonConfirming {
+  width: auto;
+  padding: 0 10px;
+  font-size: 11.5px;
+  font-weight: 700;
+  background: #f87171;
+  border-color: #f87171;
+  color: #2a0a0a;
+}
+
+.deleteButtonConfirming:hover {
+  background: #fca5a5;
+}
+
+.deleteCancelButton {
+  flex: 0 0 auto;
+  padding: 0 10px;
+  height: 26px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .identity {
   padding: 0 20px 4px;
 }
@@ -280,6 +329,10 @@
   line-height: 1.4;
   color: var(--text-muted);
   text-wrap: pretty;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .subMetricsRow {

@@ -16,9 +16,11 @@ export function Board({ nowMs }: Props) {
   const query = useSessionStore((s) => s.query);
   const selectCard = useSessionStore((s) => s.selectCard);
   const openAskWithQuery = useSessionStore((s) => s.openAskWithQuery);
+  const hideIdle = useSessionStore((s) => s.hideIdle);
 
   const hasQuery = query.trim() !== "";
-  const filtered = sessions.filter((s) => matchesQuery(s, query));
+  const visible = hideIdle ? sessions.filter((s) => s.state !== "Idle") : sessions;
+  const filtered = visible.filter((s) => matchesQuery(s, query));
   const allGroups = groupByCategory(filtered, categories);
   // Empty lanes stay visible so there's always somewhere to drag a session
   // into — but hide during an active search, matching the design's

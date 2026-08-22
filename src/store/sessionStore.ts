@@ -19,6 +19,10 @@ interface SessionStoreState {
   /** Set while a lane is a drop target during a drag — used to render the
    * hot-lane highlight; not persisted, purely transient UI state. */
   dragOverCategory: string | null;
+  /** Idle sessions are hidden from the board by default — they've already
+   * aged well past Done with no further activity, and cluttered lanes with
+   * long-settled cards otherwise. A toolbar toggle reveals them on demand. */
+  hideIdle: boolean;
 
   setSessions: (sessions: SessionView[]) => void;
   upsertSession: (s: SessionView) => void;
@@ -36,7 +40,13 @@ interface SessionStoreState {
   setCategories: (categories: string[]) => void;
   /** Appends locally after a successful `POST /categories` — no need to refetch. */
   addCategory: (name: string) => void;
+  /** Removes locally after a successful `DELETE /categories/:name` — the
+   * cascade-deleted sessions themselves arrive separately over the WS diff
+   * stream (each one is a normal `Removed` diff), so this only needs to
+   * drop the now-gone lane itself. */
+  removeCategory: (name: string) => void;
   setDragOverCategory: (name: string | null) => void;
+  toggleHideIdle: () => void;
 }
 
 export const useSessionStore = create<SessionStoreState>((set) => ({
@@ -51,6 +61,7 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   collapsedSubs: new Set(),
   categories: [],
   dragOverCategory: null,
+  hideIdle: true,
 
   setSessions: (sessions) => set({ sessions: Object.fromEntries(sessions.map((s) => [s.id, s])) }),
   upsertSession: (s) => set((state) => ({ sessions: { ...state.sessions, [s.id]: s } })),
@@ -84,5 +95,7 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   setCategories: (categories) => set({ categories }),
   addCategory: (name) =>
     set((state) => (state.categories.includes(name) ? state : { categories: [...state.categories, name] })),
+  removeCategory: (name) => set((state) => ({ categories: state.categories.filter((c) => c !== name) })),
   setDragOverCategory: (dragOverCategory) => set({ dragOverCategory }),
+  toggleHideIdle: () => set((state) => ({ hideIdle: !state.hideIdle })),
 }));

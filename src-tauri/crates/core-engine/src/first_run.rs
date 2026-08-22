@@ -135,6 +135,10 @@ pub async fn backfill_existing_sessions(
                     cwd: String::new(),
                     tool: "Claude Code".to_string(),
                     category: "Uncategorized".to_string(),
+                    // No categorization pass runs during backfill (see the
+                    // `cwd` comment above — these rows only feed search, not
+                    // live reconstruction), so there's no LLM title to store.
+                    title: String::new(),
                     created_at,
                 })
                 .await;

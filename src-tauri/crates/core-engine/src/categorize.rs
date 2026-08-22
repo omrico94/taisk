@@ -79,11 +79,19 @@ fn categorize_prompt(existing_categories: &[String], task: &str, min_confidence_
     format!(
         "Existing categories: {categories_list}\n\n\
          Task: \"{task}\"\n\n\
-         Pick the single best-fitting existing category for this task, write a short current-task summary \
-         (under 12 words) describing what this task is about, and also write a short, stable title for this \
-         session (4 words or fewer, e.g. \"Auth middleware refactor\") that will keep making sense even after \
-         the task summary changes. If none of the existing categories fit well \
-         (less than {min_confidence_percent}% confident), invent a new short category name (1-3 words) instead.\n\n\
+         You are sorting this task into a small set of broad, reusable category buckets — like folders, not \
+         descriptions. A category name must name a general area of work that many different, unrelated sessions \
+         could plausibly share (good examples: \"Backend / API\", \"DevOps / Infra\", \"Bug Fixes\", \"Frontend / UI\", \
+         \"Testing\", \"Documentation\", \"Setup & Tooling\"). A category must NOT name a specific tool, package, \
+         error, or one-off task (bad examples: \"Node.js/npm installation\", \"Fix auth token bug\", \"Postgres \
+         migration script\" — those describe this one task, not a category).\n\n\
+         Pick the single best-fitting EXISTING category only if this task's general domain genuinely belongs there \
+         — do not force a fit just because a category happens to be in the list. If none of the existing categories \
+         are a genuine domain match (less than {min_confidence_percent}% confident), invent a new category in the \
+         same broad, reusable style described above (1-3 words, a domain name, not a description of this task).\n\n\
+         Also write a short current-task summary (under 12 words) describing what this specific task is about, and \
+         a short, stable title for this session (4 words or fewer, e.g. \"Auth middleware refactor\") that will keep \
+         making sense even after the task summary changes.\n\n\
          Respond with ONLY a JSON object, no other text, in exactly this shape: \
          {{\"category\": \"<name>\", \"confidence\": <0-100 integer>, \"is_new\": <true|false>, \"task_summary\": \"<short summary>\", \"title\": \"<short title>\"}}"
     )
@@ -159,6 +167,7 @@ pub async fn categorize_session(
             cwd: cwd.to_string(),
             tool: tool.to_string(),
             category: category.clone(),
+            title: title.clone(),
             created_at: crate::now_ms(),
         })
         .await;

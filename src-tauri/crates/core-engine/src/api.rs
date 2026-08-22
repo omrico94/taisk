@@ -23,7 +23,7 @@ use crate::collector::{parse_transcript_for_display, transcript_path, Transcript
 use crate::engine::{EngineCommand, EngineHandle, SessionView};
 use crate::memory_repo::{MemoryRepo, PurgeScope};
 use crate::ollama::OllamaClient;
-use crate::orchestrator::WaitingSessions;
+use crate::orchestrator::{DismissedSessions, WaitingSessions};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -37,6 +37,12 @@ pub struct AppState {
     /// must evict it from the same durable record reconstruction reads on
     /// the next restart (see `WaitingSessions`'s doc comment).
     pub waiting_sessions: Arc<Mutex<WaitingSessions>>,
+    /// Shared with `orchestrator::run` for the same reason as
+    /// `waiting_sessions` — a delete from the board has to durably record
+    /// the dismissal in the same place reconstruction checks it, or the
+    /// session just reappears on the next restart (see
+    /// `DismissedSessions`'s doc comment).
+    pub dismissed_sessions: Arc<Mutex<DismissedSessions>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -48,7 +54,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/reply", post(reply))
         .route("/sessions/{id}/recategorize", post(recategorize))
         .route("/sessions/{id}/transcript", get(get_transcript))
+        .route("/sessions/{id}", delete(delete_session))
         .route("/categories", get(list_categories).post(create_category))
+        .route("/categories/{name}", delete(delete_category))
         .route("/search", get(search))
         .route("/memories", delete(purge_memories))
         // Frontend (Tauri webview / Vite dev server) and this API are
@@ -127,6 +135,24 @@ async fn reply(
     StatusCode::OK
 }
 
+/// The board's "Delete" action — drops the session's live card immediately
+/// and durably records the dismissal (see `DismissedSessions`) so it doesn't
+/// simply reappear the next time the app restarts and reconstructs the board
+/// from `memories`. This only removes the card; it doesn't touch the
+/// underlying transcript/memory data, and a later real hook for the same id
+/// (a resumed conversation) revives it same as any other dismissal-eviction
+/// path in this codebase.
+async fn delete_session(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
+    {
+        let mut dismissed = state.dismissed_sessions.lock().await;
+        dismissed.mark_dismissed(id.clone());
+        let _ = dismissed.save();
+    }
+    unmark_waiting(&state, &id).await;
+    state.engine.dispatch(EngineCommand::RemoveSession { id }).await;
+    StatusCode::OK
+}
+
 /// Backs the design's "Transcript tail" panel — re-reads the session's
 /// transcript file fresh on each request (not the append-only tailing/
 /// checkpoint path used for ingestion, which is a different concern: this
@@ -185,6 +211,32 @@ async fn create_category(State(state): State<AppState>, Json(body): Json<CreateC
         return StatusCode::INTERNAL_SERVER_ERROR;
     };
     match state.repo.create_category(name, embedding, crate::now_ms()).await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Deletes a category and cascades to every session currently live in it
+/// (the board's "Delete category" action) — each one goes through the exact
+/// same path a single-session delete does (durably dismissed, then removed
+/// from the live engine), so none of them reappear on the next restart
+/// either. The category's exemplar is removed last, after the cascade has
+/// been dispatched, so a crash mid-request leaves the category still
+/// visible (with its remaining sessions) rather than silently vanishing
+/// while live sessions still claim to belong to it.
+async fn delete_category(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
+    let sessions = state.engine.snapshot().await;
+    for session in sessions.into_iter().filter(|s| s.category == name) {
+        {
+            let mut dismissed = state.dismissed_sessions.lock().await;
+            dismissed.mark_dismissed(session.id.clone());
+            let _ = dismissed.save();
+        }
+        unmark_waiting(&state, &session.id).await;
+        state.engine.dispatch(EngineCommand::RemoveSession { id: session.id }).await;
+    }
+
+    match state.repo.delete_exemplar(&name).await {
         Ok(_) => StatusCode::OK,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -285,6 +337,7 @@ mod tests {
         let claude_projects_dir = claude_dir.path().to_path_buf();
         let app_dir = tempfile::tempdir().unwrap();
         let waiting_sessions_path = app_dir.path().join("waiting-sessions.json");
+        let dismissed_sessions_path = app_dir.path().join("dismissed-sessions.json");
         // Leak the tempdirs so they aren't cleaned up while the server is
         // running for the lifetime of the test.
         std::mem::forget(lance_dir);
@@ -298,6 +351,7 @@ mod tests {
             config: Arc::new(CategorizationConfig::default()),
             claude_projects_dir,
             waiting_sessions: Arc::new(Mutex::new(WaitingSessions::load(&waiting_sessions_path))),
+            dismissed_sessions: Arc::new(Mutex::new(DismissedSessions::load(&dismissed_sessions_path))),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -434,6 +488,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_session_removes_it_and_durably_marks_it_dismissed() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        state
+            .engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "s1".into(),
+                event: SessionEvent::SessionStart,
+                project: None,
+                cwd: None,
+                started_at_ms: None,
+                entrypoint: None,
+            })
+            .await;
+        assert_eq!(state.engine.snapshot().await.len(), 1);
+
+        let resp = client.delete(format!("{base}/sessions/s1")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert!(state.engine.snapshot().await.is_empty(), "deleting must remove the live card");
+        assert!(
+            state.dismissed_sessions.lock().await.contains("s1"),
+            "deleting must durably mark the session dismissed so it doesn't reappear on restart"
+        );
+    }
+
+    #[tokio::test]
     async fn search_marks_live_sessions_and_purge_removes_them() {
         let (base, state) = spawn_test_server().await;
         let client = reqwest::Client::new();
@@ -463,6 +544,7 @@ mod tests {
                 cwd: "/x".into(),
                 tool: "Claude Code".into(),
                 category: "Backend / API".into(),
+                title: "Refactor auth middleware".into(),
                 created_at: 0,
             })
             .await
@@ -548,6 +630,60 @@ mod tests {
         assert_eq!(resp.status(), 400);
     }
 
+    #[tokio::test]
+    async fn delete_category_cascades_to_its_live_sessions_and_removes_the_lane() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("{base}/categories"))
+            .json(&serde_json::json!({"name": "Ops / Infra"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        for id in ["s1", "s2"] {
+            state
+                .engine
+                .dispatch(EngineCommand::SessionEvent {
+                    id: id.into(),
+                    event: SessionEvent::SessionStart,
+                    project: None,
+                    cwd: None,
+                    started_at_ms: None,
+                    entrypoint: None,
+                })
+                .await;
+            state.engine.dispatch(EngineCommand::SetCategory { id: id.into(), category: "Ops / Infra".into() }).await;
+        }
+        // An unrelated session in a different category must survive.
+        state
+            .engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "other".into(),
+                event: SessionEvent::SessionStart,
+                project: None,
+                cwd: None,
+                started_at_ms: None,
+                entrypoint: None,
+            })
+            .await;
+        assert_eq!(state.engine.snapshot().await.len(), 3);
+
+        let resp = client.delete(format!("{base}/categories/{}", "Ops%20%2F%20Infra")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let snapshot = state.engine.snapshot().await;
+        assert_eq!(snapshot.len(), 1, "both sessions in the deleted category must be removed, the other left alone");
+        assert_eq!(snapshot[0].id, "other");
+        assert!(state.dismissed_sessions.lock().await.contains("s1"));
+        assert!(state.dismissed_sessions.lock().await.contains("s2"));
+
+        let categories: Vec<String> = client.get(format!("{base}/categories")).send().await.unwrap().json().await.unwrap();
+        assert!(!categories.contains(&"Ops / Infra".to_string()), "the deleted category must no longer be known");
+    }
+
     /// Regression (user report, twice — search for a query as literal as
     /// "todo" against a memory whose text contains "Todo list" came back
     /// empty): there is no hard relevance floor. Both a near-exact match and
@@ -574,6 +710,7 @@ mod tests {
                 cwd: "/x".into(),
                 tool: "Claude Code".into(),
                 category: "Backend / API".into(),
+                title: "Refactor auth middleware".into(),
                 created_at: 0,
             })
             .await
@@ -598,6 +735,7 @@ mod tests {
                 cwd: "/x".into(),
                 tool: "Claude Code".into(),
                 category: "Backend / API".into(),
+                title: "Refactor auth middleware".into(),
                 created_at: 0,
             })
             .await

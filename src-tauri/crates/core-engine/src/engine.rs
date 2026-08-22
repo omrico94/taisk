@@ -172,6 +172,13 @@ pub enum EngineCommand {
     /// `orchestrator.rs`, since it needs `EndedSessions` to exempt
     /// explicitly-closed sessions.
     SweepIdle { now_ms: i64, ttl_ms: i64 },
+    /// Explicit user-initiated delete (the board's "Delete" action) — drops
+    /// the session from the live map entirely and broadcasts `Removed`
+    /// rather than transitioning it through the state machine, since there's
+    /// no state that means "gone." The caller (`api::delete_session`) is
+    /// responsible for durably recording the dismissal too, or this id would
+    /// simply be reconstructed again on the next restart.
+    RemoveSession { id: SessionId },
     Snapshot { respond_to: oneshot::Sender<Vec<SessionView>> },
 }
 
@@ -292,6 +299,11 @@ impl EngineHandle {
                                 view.state = state::transition(view.state, SessionEvent::IdleTimeout);
                                 let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
                             }
+                        }
+                    }
+                    EngineCommand::RemoveSession { id } => {
+                        if sessions.remove(&id).is_some() {
+                            let _ = diff_tx_actor.send(SessionDiff::Removed(id));
                         }
                     }
                     EngineCommand::Snapshot { respond_to } => {
@@ -638,5 +650,31 @@ mod tests {
         };
         engine.dispatch(EngineCommand::SetPlan { id: "s1".into(), plan: Some(plan.clone()) }).await;
         assert_eq!(engine.snapshot().await[0].plan, Some(plan));
+    }
+
+    #[tokio::test]
+    async fn remove_session_drops_it_from_the_snapshot_and_broadcasts_removed() {
+        let engine = EngineHandle::spawn();
+        let mut diffs = engine.subscribe();
+        engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "s1".into(),
+                event: SessionEvent::SessionStart,
+                project: None,
+                cwd: None,
+                entrypoint: None,
+                started_at_ms: None,
+            })
+            .await;
+        diffs.recv().await.unwrap(); // the SessionStart upsert
+
+        engine.dispatch(EngineCommand::RemoveSession { id: "s1".into() }).await;
+        let diff = diffs.recv().await.unwrap();
+        assert!(matches!(diff, SessionDiff::Removed(id) if id == "s1"));
+        assert!(engine.snapshot().await.is_empty());
+
+        // Removing an id that isn't present is a no-op, not a spurious broadcast.
+        engine.dispatch(EngineCommand::RemoveSession { id: "ghost".into() }).await;
+        assert!(engine.snapshot().await.is_empty());
     }
 }

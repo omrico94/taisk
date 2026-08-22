@@ -4,7 +4,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { useShallow } from "zustand/react/shallow";
 import { useSessionStore } from "../store/sessionStore";
 import type { SessionState } from "../types";
-import { approveSession, getTranscript, recategorizeSession, rejectSession, replySession, type TranscriptRow } from "../api";
+import {
+  approveSession,
+  deleteSession,
+  getTranscript,
+  recategorizeSession,
+  rejectSession,
+  replySession,
+  type TranscriptRow,
+} from "../api";
 import {
   STATE_COLOR_VAR,
   STATE_LABEL,
@@ -45,6 +53,12 @@ export function DetailDrawer({ nowMs }: Props) {
   );
 
   const [transcript, setTranscript] = useState<TranscriptRow[]>([]);
+  // Arm/confirm state for the delete button (see `del` below) — deliberately
+  // not `window.confirm()`: that's a native browser dialog, and Tauri's
+  // WebView doesn't reliably show it (confirmed live — it silently returns
+  // `false` without ever prompting, so the delete button did nothing at
+  // all). An in-UI two-click confirm needs no dialog support from the host.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   // M10: real transcript fetch (replacing M8's MOCK_TRANSCRIPTS). Re-fetches
   // whenever the selected session changes — this is a point-in-time read,
@@ -63,6 +77,12 @@ export function DetailDrawer({ nowMs }: Props) {
     return () => {
       cancelled = true;
     };
+  }, [selectedId]);
+
+  // Selecting a different session (or closing/reopening the drawer) must not
+  // carry over an armed delete state onto whatever's shown next.
+  useEffect(() => {
+    setConfirmingDelete(false);
   }, [selectedId]);
 
   if (!session || !selectedId) return null;
@@ -86,6 +106,21 @@ export function DetailDrawer({ nowMs }: Props) {
   };
   const send = () => {
     replySession(session.id, replyText.trim());
+    selectCard(null);
+  };
+
+  // Removes the card from the board entirely (durably, so it doesn't just
+  // come back on the next restart — see the backend's `DismissedSessions`).
+  // A resumed session reusing this id still revives normally, same as any
+  // other dismissal in this codebase. Two clicks required (arm, then
+  // confirm) instead of `window.confirm()` — see `confirmingDelete`'s doc
+  // comment for why.
+  const del = () => {
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    deleteSession(session.id);
     selectCard(null);
   };
 
@@ -125,6 +160,18 @@ export function DetailDrawer({ nowMs }: Props) {
         </span>
         <span className={styles.spacer} />
         <span className={styles.elapsed}>{formatElapsed(session.started_at_ms, nowMs)}</span>
+        {confirmingDelete && (
+          <button className={styles.deleteCancelButton} onClick={() => setConfirmingDelete(false)}>
+            Cancel
+          </button>
+        )}
+        <button
+          className={`${styles.deleteButton} ${confirmingDelete ? styles.deleteButtonConfirming : ""}`}
+          onClick={del}
+          title={confirmingDelete ? "Click again to permanently delete" : "Delete this session from the board"}
+        >
+          {confirmingDelete ? "Confirm delete" : "🗑"}
+        </button>
         <button className={styles.closeButton} onClick={() => selectCard(null)}>
           ✕
         </button>

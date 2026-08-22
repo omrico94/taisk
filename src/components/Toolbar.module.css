@@ -15,3 +15,25 @@
   color: var(--text-faint);
   font-family: var(--font-mono);
 }
+
+.idleToggle {
+  padding: 7px 12px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-muted-alt);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.idleToggle:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.idleToggleActive {
+  background: rgba(56, 189, 248, 0.1);
+  border-color: rgba(56, 189, 248, 0.28);
+  color: var(--accent-cyan-light);
+}

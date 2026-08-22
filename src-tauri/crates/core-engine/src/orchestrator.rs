@@ -77,6 +77,12 @@ pub struct OrchestratorConfig {
     /// unlike `Working`/`Done` which self-correct from the next hook or the
     /// idle sweep.
     pub waiting_sessions_path: PathBuf,
+    /// Durable record of session ids explicitly deleted from the board (see
+    /// `DismissedSessions`) — without this, a deleted session would simply
+    /// reappear on the next restart's reconstruction, since its `memories`
+    /// row and recently-modified transcript are still sitting on disk and
+    /// look exactly like any other recent session.
+    pub dismissed_sessions_path: PathBuf,
 }
 
 /// Reads a `Duration` (in seconds) from an env var, falling back to
@@ -105,10 +111,22 @@ impl Default for OrchestratorConfig {
             // stat+read every 150ms in one spawned task) while waiting, not
             // anything blocking, so erring long here is nearly free — a
             // session that's truly abandoned still eventually gets skipped.
-            transcript_wait: Duration::from_secs(5 * 60),
+            // Raised further (user report): a DevSwarm-orchestrated
+            // session's transcript can open with leading `queue-operation`
+            // lines before the real initiating `"user"` line lands — actual
+            // prompt delivery can trail well past the plain-CLI 22-27s
+            // typing delay this was originally tuned for, and once this
+            // deadline passes the session id is dropped permanently (any
+            // later hook for an unrecognized id is a deliberate no-op — see
+            // engine.rs — so there's no second chance). 15 minutes stays
+            // cheap for the same reason 5 did.
+            transcript_wait: duration_from_env_secs("SESSIONBOARD_TRANSCRIPT_WAIT_SECS", Duration::from_secs(15 * 60)),
             // A day comfortably covers "closed the app overnight, reopened
             // the next morning" without resurrecting genuinely old sessions.
-            reconstruction_recency: Duration::from_secs(24 * 60 * 60),
+            reconstruction_recency: duration_from_env_secs(
+                "SESSIONBOARD_RECONSTRUCTION_RECENCY_SECS",
+                Duration::from_secs(24 * 60 * 60),
+            ),
             // Generous enough that normal thinking/typing pauses between
             // turns never trip it, but short enough that a closed terminal
             // doesn't sit looking "Working" for the rest of the day.
@@ -119,6 +137,7 @@ impl Default for OrchestratorConfig {
             idle_sweep_interval: duration_from_env_secs("SESSIONBOARD_SWEEP_INTERVAL_SECS", Duration::from_secs(60)),
             ended_sessions_path: crate::first_run::app_data_dir().join("ended-sessions.json"),
             waiting_sessions_path: crate::first_run::app_data_dir().join("waiting-sessions.json"),
+            dismissed_sessions_path: crate::first_run::app_data_dir().join("dismissed-sessions.json"),
         }
     }
 }
@@ -229,6 +248,55 @@ impl WaitingSessions {
     }
 }
 
+/// Durable record of session ids explicitly deleted from the board (the
+/// "Delete" action in the drawer). Same flat-file pattern as `EndedSessions`/
+/// `WaitingSessions`, for the same underlying reason: a `memories` row and a
+/// recently-modified transcript file survive a restart regardless of whether
+/// the user deleted the card, so `reconstruct_live_sessions` needs its own
+/// durable signal to know not to bring it back. An id is evicted the moment
+/// any later hook fires for it — real activity is proof the session (or a
+/// resumed conversation reusing its id) is alive again, so a stale dismissal
+/// must not keep hiding it forever, mirroring `EndedSessions::unmark_ended`.
+pub struct DismissedSessions {
+    path: PathBuf,
+    ids: HashSet<String>,
+}
+
+impl DismissedSessions {
+    pub fn load(path: &Path) -> Self {
+        let ids = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        Self { path: path.to_path_buf(), ids }
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+
+    pub fn mark_dismissed(&mut self, id: String) {
+        self.ids.insert(id);
+    }
+
+    /// Returns whether anything actually changed, so callers only pay for a
+    /// save when needed.
+    pub fn unmark_dismissed(&mut self, id: &str) -> bool {
+        self.ids.remove(id)
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let pretty = serde_json::to_string_pretty(&self.ids)?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, pretty)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+}
+
 /// Restores the board from durable memory on Core Engine startup (user
 /// feedback: sessions should reappear with their real categories after a
 /// restart, not vanish until the next hook event happens to touch them).
@@ -258,12 +326,16 @@ async fn reconstruct_live_sessions(
     orch_config: &OrchestratorConfig,
     ended_sessions: &EndedSessions,
     waiting_sessions: &WaitingSessions,
+    dismissed_sessions: &DismissedSessions,
 ) {
     let Ok(memories) = repo.list_session_memories().await else { return };
 
     for memory in memories {
         if memory.cwd.is_empty() {
             continue; // backfilled historical entry with no recoverable cwd — see first_run.rs
+        }
+        if dismissed_sessions.contains(&memory.session_id) {
+            continue; // explicitly deleted from the board — stay gone until real activity revives it
         }
 
         let path = transcript_path(&orch_config.claude_projects_dir, &memory.cwd, &memory.session_id);
@@ -359,12 +431,20 @@ async fn reconstruct_live_sessions(
                     .await;
             }
         }
-        engine.dispatch(EngineCommand::SetCategory { id: memory.session_id.clone(), category: memory.category }).await;
-        // No durable record of the original LLM-generated title exists in
-        // the `memories` schema (same gap as `entrypoint` — see its doc
-        // comment above) — approximate it from the same prompt text used
-        // for `desc`, just trimmed to a title-length handful of words.
-        let title = memory.text.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+        engine.dispatch(EngineCommand::SetCategory { id: memory.session_id.clone(), category: memory.category.clone() }).await;
+        // The real LLM-generated title is now stored durably on the memory
+        // row (`Memory::title`) — restore it directly. Only rows written
+        // before that field existed have it empty (self-healing schema drops
+        // and recreates the table on the next `MemoryRepo::open` once a
+        // column is missing, but a row upserted between that recreation and
+        // this code shipping could still be blank) — approximate the same
+        // way `entrypoint` does for its own un-recoverable gap: the prompt's
+        // first few words, trimmed to a title-length handful.
+        let title = if memory.title.trim().is_empty() {
+            memory.text.split_whitespace().take(4).collect::<Vec<_>>().join(" ")
+        } else {
+            memory.title.clone()
+        };
         engine.dispatch(EngineCommand::SetTitle { id: memory.session_id.clone(), title }).await;
         engine.dispatch(EngineCommand::SetDesc { id: memory.session_id.clone(), desc: memory.text.chars().take(80).collect() }).await;
         // Restore real metrics from the transcript too, so a reconstructed
@@ -372,7 +452,7 @@ async fn reconstruct_live_sessions(
         if let Some(m) = extract_usage_metrics(&path) {
             engine
                 .dispatch(EngineCommand::SetMetrics {
-                    id: memory.session_id,
+                    id: memory.session_id.clone(),
                     tokens: m.tokens,
                     cost: m.cost,
                     ctx_used: m.ctx_used,
@@ -380,6 +460,17 @@ async fn reconstruct_live_sessions(
                 })
                 .await;
         }
+        // Regression (user report — a session's subagent tree vanished from
+        // the board): subagents and the task plan are otherwise only set by
+        // the "stop" hook, so without restoring them here too, *any* restart
+        // (a real relaunch, or just the dev file-watcher rebuilding after an
+        // edit) silently wiped a live session's subagent tree/plan until its
+        // next Stop hook happened to fire — even though nothing about the
+        // underlying data on disk had changed.
+        let subs = list_subagents(&orch_config.claude_projects_dir, &memory.cwd, &memory.session_id);
+        engine.dispatch(EngineCommand::SetSubagents { id: memory.session_id.clone(), subs }).await;
+        let plan = read_session_plan(&orch_config.tasks_dir, &memory.session_id, &memory.category);
+        engine.dispatch(EngineCommand::SetPlan { id: memory.session_id, plan }).await;
     }
 }
 
@@ -437,6 +528,7 @@ pub async fn run(
     cat_config: Arc<CategorizationConfig>,
     orch_config: Arc<OrchestratorConfig>,
     waiting_sessions: Arc<Mutex<WaitingSessions>>,
+    dismissed_sessions: Arc<Mutex<DismissedSessions>>,
 ) {
     let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
     reconstruct_live_sessions(
@@ -445,6 +537,7 @@ pub async fn run(
         &orch_config,
         &*ended_sessions.lock().await,
         &*waiting_sessions.lock().await,
+        &*dismissed_sessions.lock().await,
     )
     .await;
 
@@ -469,6 +562,7 @@ pub async fn run(
         let checkpoints = checkpoints.clone();
         let ended_sessions = ended_sessions.clone();
         let waiting_sessions = waiting_sessions.clone();
+        let dismissed_sessions = dismissed_sessions.clone();
 
         tokio::spawn(async move {
             handle_hook_event(
@@ -481,6 +575,7 @@ pub async fn run(
                 &checkpoints,
                 &ended_sessions,
                 &waiting_sessions,
+                &dismissed_sessions,
             )
             .await;
         });
@@ -497,10 +592,22 @@ async fn handle_hook_event(
     checkpoints: &Arc<Mutex<TailCheckpoints>>,
     ended_sessions: &Arc<Mutex<EndedSessions>>,
     waiting_sessions: &Arc<Mutex<WaitingSessions>>,
+    dismissed_sessions: &Arc<Mutex<DismissedSessions>>,
 ) {
     let Some(session_id) = event.payload.get("session_id").and_then(|v| v.as_str()).map(str::to_string) else {
         return;
     };
+
+    // Any real hook is live proof this session is active again (most often a
+    // resumed conversation reusing its old id) — evict it from the durable
+    // dismissed-record now rather than waiting for a restart to correct it,
+    // mirroring `ended_sessions`'s unmark below.
+    {
+        let mut dismissed = dismissed_sessions.lock().await;
+        if dismissed.unmark_dismissed(&session_id) {
+            let _ = dismissed.save();
+        }
+    }
 
     // Any real hook other than a fresh `session-end` is live proof this
     // session is not actually done — evict it from the durable ended-record
@@ -540,8 +647,21 @@ async fn handle_hook_event(
     // code.claude.com/docs/en/hooks.md).
     let notification_type = event.payload.get("notification_type").and_then(|v| v.as_str());
     let is_idle_prompt = event.event == "notification" && notification_type == Some("idle_prompt");
+    // `permission-request` is `PermissionRequest`, not `Notification`'s
+    // `permission_prompt` type (regression — user report: a session sitting
+    // on a real "Allow Claude to run?" approval dialog kept reading
+    // `Working` for the entire dialog). Confirmed against the hooks docs
+    // (code.claude.com/docs/en/hooks.md): `Notification`'s `permission_prompt`
+    // only fires once the user has gone ~6s without typing, so a prompt
+    // approved or denied quickly — the common case — never produced it at
+    // all. `PermissionRequest` fires the instant Claude Code is about to
+    // show the dialog, with no idle gating. We never write a decision to
+    // stdout (hook-bridge just forwards and exits), so this purely observes
+    // — the normal permission flow (including any real deny rules) is
+    // untouched.
     let drives_waiting = (event.event == "notification" && !is_idle_prompt)
-        || (event.event == "pre-tool-use" && event.payload.get("tool_name").and_then(|v| v.as_str()) == Some("AskUserQuestion"));
+        || (event.event == "pre-tool-use" && event.payload.get("tool_name").and_then(|v| v.as_str()) == Some("AskUserQuestion"))
+        || event.event == "permission-request";
     if !is_idle_prompt {
         let mut waiting = waiting_sessions.lock().await;
         if drives_waiting {
@@ -650,6 +770,21 @@ async fn handle_hook_event(
         "pre-tool-use"
             if event.payload.get("tool_name").and_then(|v| v.as_str()) == Some("AskUserQuestion") =>
         {
+            engine
+                .dispatch(EngineCommand::SessionEvent {
+                    id: session_id,
+                    event: SessionEvent::Notification,
+                    project: None,
+                    cwd: None,
+                    entrypoint: None,
+                    started_at_ms: None,
+                })
+                .await;
+        }
+        // See the `drives_waiting` doc comment above for why this exists
+        // alongside `Notification`'s `permission_prompt` type rather than
+        // relying on it alone.
+        "permission-request" => {
             engine
                 .dispatch(EngineCommand::SessionEvent {
                     id: session_id,
@@ -812,6 +947,16 @@ mod tests {
         })
     }
 
+    fn real_permission_request_payload(session_id: &str, tool_name: &str, tool_use_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "tool_input": {},
+            "tool_use_id": tool_use_id,
+            "permission_mode": "default",
+        })
+    }
+
     fn real_stop_payload(session_id: &str, stop_reason: &str) -> serde_json::Value {
         serde_json::json!({"session_id": session_id, "stop_reason": stop_reason})
     }
@@ -845,6 +990,7 @@ mod tests {
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
             category: "Backend / API".to_string(),
+            title: String::new(),
             created_at: 1_700_000_000_000,
         })
         .await
@@ -860,8 +1006,9 @@ mod tests {
         };
         let ended_sessions = EndedSessions::load(&orch_config.ended_sessions_path);
         let waiting_sessions = WaitingSessions::load(&orch_config.waiting_sessions_path);
+        let dismissed_sessions = DismissedSessions::load(&orch_config.dismissed_sessions_path);
 
-        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions).await;
+        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions, &dismissed_sessions).await;
 
         let snapshot = engine.snapshot().await;
         assert_eq!(snapshot.len(), 1);
@@ -872,6 +1019,141 @@ mod tests {
         assert_eq!(snapshot[0].desc, "Refactor auth middleware to async/await");
         assert_eq!(snapshot[0].title, "Refactor auth middleware to");
         assert_eq!(snapshot[0].started_at_ms, 1_700_000_000_000);
+    }
+
+    /// Regression (user report — a session's real title was silently
+    /// replaced by a crude 4-word prompt chop on every Core Engine restart,
+    /// including routine dev-mode rebuilds): the LLM-generated title from
+    /// `categorize_session` must now be restored verbatim from the durable
+    /// `memories` row, not recomputed from `text` — recomputing is only the
+    /// fallback for rows with no stored title (see the test above).
+    #[tokio::test]
+    async fn reconstructs_a_session_with_its_stored_llm_title_not_a_crude_fallback() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+
+        let cwd = "/Users/omricohen/api-gateway";
+        let session_id = "restored-titled";
+        let path = transcript_path(claude_dir.path(), cwd, session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+
+        let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
+        repo.upsert_memory(&Memory {
+            id: format!("{session_id}-prompt"),
+            session_id: session_id.to_string(),
+            kind: MemoryKind::Prompt,
+            text: "Refactor auth middleware to async/await".to_string(),
+            embedding: vec![1.0; 768],
+            project: "api-gateway".to_string(),
+            cwd: cwd.to_string(),
+            tool: "Claude Code".to_string(),
+            category: "Backend / API".to_string(),
+            title: "Auth middleware refactor".to_string(),
+            created_at: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+        let engine = EngineHandle::spawn();
+        let app_dir = tempfile::tempdir().unwrap();
+        let orch_config = OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            ended_sessions_path: app_dir.path().join("ended-sessions.json"),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            ..OrchestratorConfig::default()
+        };
+        let ended_sessions = EndedSessions::load(&orch_config.ended_sessions_path);
+        let waiting_sessions = WaitingSessions::load(&orch_config.waiting_sessions_path);
+        let dismissed_sessions = DismissedSessions::load(&orch_config.dismissed_sessions_path);
+
+        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions, &dismissed_sessions).await;
+
+        let snapshot = engine.snapshot().await;
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].title, "Auth middleware refactor");
+    }
+
+    /// Regression (user report — a live session's subagent tree vanished
+    /// from the board): subagents and the task plan are otherwise only ever
+    /// set by the "stop" hook, so without restoring them during
+    /// reconstruction too, *any* restart (including a dev-mode rebuild, not
+    /// just a real relaunch) silently wiped them from a live session's card
+    /// until its next Stop hook happened to fire — even though nothing
+    /// about the underlying subagent transcripts or task files on disk had
+    /// changed.
+    #[tokio::test]
+    async fn reconstruction_restores_subagents_and_plan_from_disk_not_just_metrics() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let tasks_dir = tempfile::tempdir().unwrap();
+
+        let cwd = "/Users/omricohen/api-gateway";
+        let session_id = "restored-with-subs-1";
+        let path = transcript_path(claude_dir.path(), cwd, session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+
+        let subs_dir = path.parent().unwrap().join(session_id).join("subagents");
+        std::fs::create_dir_all(&subs_dir).unwrap();
+        std::fs::write(
+            subs_dir.join("agent-abc.jsonl"),
+            serde_json::json!({"type":"user","message":{"role":"user","content":"Find the flaky test"}}).to_string() + "\n",
+        )
+        .unwrap();
+        std::fs::write(
+            subs_dir.join("agent-abc.meta.json"),
+            serde_json::json!({"agentType":"general-purpose","description":"Investigate flaky CI test"}).to_string(),
+        )
+        .unwrap();
+
+        let session_tasks_dir = tasks_dir.path().join(session_id);
+        std::fs::create_dir_all(&session_tasks_dir).unwrap();
+        std::fs::write(
+            session_tasks_dir.join("1.json"),
+            serde_json::json!({"id":"1","subject":"Write the plan","status":"completed"}).to_string(),
+        )
+        .unwrap();
+
+        let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
+        repo.upsert_memory(&Memory {
+            id: format!("{session_id}-prompt"),
+            session_id: session_id.to_string(),
+            kind: MemoryKind::Prompt,
+            text: "Refactor auth middleware".to_string(),
+            embedding: vec![1.0; 768],
+            project: "api-gateway".to_string(),
+            cwd: cwd.to_string(),
+            tool: "Claude Code".to_string(),
+            category: "Backend / API".to_string(),
+            title: String::new(),
+            created_at: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+        let engine = EngineHandle::spawn();
+        let app_dir = tempfile::tempdir().unwrap();
+        let orch_config = OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            tasks_dir: tasks_dir.path().to_path_buf(),
+            ended_sessions_path: app_dir.path().join("ended-sessions.json"),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            ..OrchestratorConfig::default()
+        };
+        let ended_sessions = EndedSessions::load(&orch_config.ended_sessions_path);
+        let waiting_sessions = WaitingSessions::load(&orch_config.waiting_sessions_path);
+        let dismissed_sessions = DismissedSessions::load(&orch_config.dismissed_sessions_path);
+
+        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions, &dismissed_sessions).await;
+
+        let snapshot = engine.snapshot().await;
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].subs.len(), 1, "subagent must be restored from disk on reconstruction, not left empty");
+        assert_eq!(snapshot[0].subs[0].title, "Investigate flaky CI test");
+        let plan = snapshot[0].plan.as_ref().expect("plan must be restored from disk on reconstruction");
+        assert_eq!(plan.steps.len(), 1);
+        assert!(plan.steps[0].done);
     }
 
     /// Regression (user report — sessions that aren't actually being worked
@@ -912,6 +1194,7 @@ mod tests {
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
             category: "Backend / API".to_string(),
+            title: String::new(),
             created_at: 1_700_000_000_000,
         })
         .await
@@ -926,8 +1209,9 @@ mod tests {
         };
         let ended_sessions = EndedSessions::load(&orch_config.ended_sessions_path);
         let waiting_sessions = WaitingSessions::load(&orch_config.waiting_sessions_path);
+        let dismissed_sessions = DismissedSessions::load(&orch_config.dismissed_sessions_path);
 
-        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions).await;
+        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions, &dismissed_sessions).await;
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Working);
 
         // A 1-minute idle_ttl comfortably fits inside the 3-minute-old
@@ -974,6 +1258,7 @@ mod tests {
                 cwd: cwd.to_string(),
                 tool: "Claude Code".to_string(),
                 category: "Backend / API".to_string(),
+                title: String::new(),
                 created_at: 1_700_000_000_000,
             })
             .await
@@ -999,8 +1284,9 @@ mod tests {
         };
         let ended_sessions = EndedSessions::load(&orch_config.ended_sessions_path);
         let waiting_sessions = WaitingSessions::load(&orch_config.waiting_sessions_path);
+        let dismissed_sessions = DismissedSessions::load(&orch_config.dismissed_sessions_path);
 
-        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions).await;
+        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions, &dismissed_sessions).await;
 
         let snapshot = engine.snapshot().await;
         let get = |id: &str| snapshot.iter().find(|v| v.id == id).unwrap().state;
@@ -1038,6 +1324,7 @@ mod tests {
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
             category: "Backend / API".to_string(),
+            title: String::new(),
             created_at: 1_700_000_000_000,
         })
         .await
@@ -1052,9 +1339,10 @@ mod tests {
         };
         let ended_sessions = EndedSessions::load(&orch_config.ended_sessions_path);
         let mut waiting_sessions = WaitingSessions::load(&orch_config.waiting_sessions_path);
+        let dismissed_sessions = DismissedSessions::load(&orch_config.dismissed_sessions_path);
         waiting_sessions.mark_waiting(session_id.to_string());
 
-        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions).await;
+        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions, &dismissed_sessions).await;
 
         let snapshot = engine.snapshot().await;
         assert_eq!(snapshot.len(), 1);
@@ -1090,6 +1378,7 @@ mod tests {
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
             category: "Backend / API".to_string(),
+            title: String::new(),
             created_at: 1_700_000_000_000,
         })
         .await
@@ -1105,13 +1394,108 @@ mod tests {
         let mut ended_sessions = EndedSessions::load(&orch_config.ended_sessions_path);
         ended_sessions.mark_ended(session_id.to_string());
         let waiting_sessions = WaitingSessions::load(&orch_config.waiting_sessions_path);
+        let dismissed_sessions = DismissedSessions::load(&orch_config.dismissed_sessions_path);
 
-        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions).await;
+        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions, &dismissed_sessions).await;
 
         let snapshot = engine.snapshot().await;
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].id, session_id);
         assert_eq!(snapshot[0].state, crate::state::SessionState::Done);
+    }
+
+    /// The Delete feature's actual point: without this, a deleted session
+    /// would simply reappear on the very next restart, since its `memories`
+    /// row and recently-modified transcript are otherwise indistinguishable
+    /// from any other recent, legitimately-live session.
+    #[tokio::test]
+    async fn reconstruction_skips_a_dismissed_session() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let cwd = "/Users/omricohen/api-gateway";
+        let session_id = "deleted-1";
+        let path = transcript_path(claude_dir.path(), cwd, session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}\n").unwrap(); // freshly written -> recent mtime
+
+        let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
+        repo.upsert_memory(&Memory {
+            id: format!("{session_id}-prompt"),
+            session_id: session_id.to_string(),
+            kind: MemoryKind::Prompt,
+            text: "Refactor auth middleware to async/await".to_string(),
+            embedding: vec![1.0; 768],
+            project: "api-gateway".to_string(),
+            cwd: cwd.to_string(),
+            tool: "Claude Code".to_string(),
+            category: "Backend / API".to_string(),
+            title: String::new(),
+            created_at: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+        let engine = EngineHandle::spawn();
+        let orch_config = OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            ended_sessions_path: app_dir.path().join("ended-sessions.json"),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            dismissed_sessions_path: app_dir.path().join("dismissed-sessions.json"),
+            ..OrchestratorConfig::default()
+        };
+        let ended_sessions = EndedSessions::load(&orch_config.ended_sessions_path);
+        let waiting_sessions = WaitingSessions::load(&orch_config.waiting_sessions_path);
+        let mut dismissed_sessions = DismissedSessions::load(&orch_config.dismissed_sessions_path);
+        dismissed_sessions.mark_dismissed(session_id.to_string());
+
+        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions, &dismissed_sessions).await;
+
+        assert!(engine.snapshot().await.is_empty(), "a dismissed session must not be reconstructed onto the board");
+    }
+
+    /// Mirrors `a_later_hook_evicts_the_session_from_ended_sessions`: any
+    /// real hook for a previously-dismissed id (a resumed conversation
+    /// reusing it) is live proof the session is active again, so it must be
+    /// evicted from the durable dismissed-record — otherwise a restart
+    /// shortly after would immediately hide it again despite the live
+    /// engine correctly showing it.
+    #[tokio::test]
+    async fn a_later_hook_evicts_the_session_from_dismissed_sessions() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
+        let engine = EngineHandle::spawn();
+        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
+        let cat_config = CategorizationConfig::default();
+        let orch_config = OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
+            ended_sessions_path: app_dir.path().join("ended-sessions.json"),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            dismissed_sessions_path: app_dir.path().join("dismissed-sessions.json"),
+            ..OrchestratorConfig::default()
+        };
+        let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
+        let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
+        let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+        {
+            let mut dismissed = dismissed_sessions.lock().await;
+            dismissed.mark_dismissed("s1".to_string());
+            dismissed.save().unwrap();
+        }
+
+        let event = HookEvent { event: "stop".into(), payload: real_stop_payload("s1", "end_turn") };
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
+            .await;
+
+        assert!(!dismissed_sessions.lock().await.contains("s1"), "the hook should evict the stale dismissed-record");
+        let reloaded = DismissedSessions::load(&orch_config.dismissed_sessions_path);
+        assert!(!reloaded.contains("s1"), "the eviction should be durably persisted");
     }
 
     #[tokio::test]
@@ -1139,6 +1523,7 @@ mod tests {
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
             category: "Backend / API".to_string(),
+            title: String::new(),
             created_at: 0,
         })
         .await
@@ -1154,8 +1539,9 @@ mod tests {
         };
         let ended_sessions = EndedSessions::load(&orch_config.ended_sessions_path);
         let waiting_sessions = WaitingSessions::load(&orch_config.waiting_sessions_path);
+        let dismissed_sessions = DismissedSessions::load(&orch_config.dismissed_sessions_path);
 
-        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions).await;
+        reconstruct_live_sessions(&engine, &repo, &orch_config, &ended_sessions, &waiting_sessions, &dismissed_sessions).await;
 
         assert!(engine.snapshot().await.is_empty(), "a long-stale session must not be resurrected as a false ghost");
     }
@@ -1202,8 +1588,9 @@ mod tests {
             ..OrchestratorConfig::default()
         });
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions));
         // Give the orchestrator a moment to bind the UDS before the fake
         // hook-bridge client below tries to connect to it.
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1296,12 +1683,13 @@ mod tests {
         let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
         let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let event = HookEvent {
             event: "pre-tool-use".into(),
             payload: real_pre_tool_use_payload("s1", "AskUserQuestion", "toolu_1"),
         };
-        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions)
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
             .await;
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Waiting);
         assert!(waiting_sessions.lock().await.contains("s1"), "AskUserQuestion should durably record the wait");
@@ -1311,12 +1699,86 @@ mod tests {
             event: "pre-tool-use".into(),
             payload: real_pre_tool_use_payload("s1", "Bash", "toolu_2"),
         };
-        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions)
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
             .await;
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Working);
         assert!(
             !waiting_sessions.lock().await.contains("s1"),
             "further activity should evict the durable wait record"
+        );
+    }
+
+    /// Regression (user report, with a screenshot of a real "Allow Claude to
+    /// run?" Bash approval dialog: the card stayed on Working the entire
+    /// time): `Notification`'s `permission_prompt` type is gated behind ~6s
+    /// of no typing (confirmed against code.claude.com/docs/en/hooks.md), so
+    /// a dialog approved or denied quickly — the common case — never
+    /// produced it at all. `PermissionRequest` fires the instant the dialog
+    /// is about to be shown, with no such gating, so it's the signal that
+    /// actually has to drive Waiting here.
+    #[tokio::test]
+    async fn permission_request_marks_the_session_waiting_even_when_approved_quickly() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let engine = EngineHandle::spawn();
+        engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "s1".into(),
+                event: SessionEvent::SessionStart,
+                project: None,
+                cwd: None,
+                entrypoint: None,
+                started_at_ms: Some(0),
+            })
+            .await;
+
+        let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
+        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
+        let cat_config = CategorizationConfig::default();
+        let orch_config = OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
+            ended_sessions_path: app_dir.path().join("ended-sessions.json"),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            ..OrchestratorConfig::default()
+        };
+        let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
+        let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
+        let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+
+        // PreToolUse fires first (before the permission check) and marks Working.
+        let event = HookEvent {
+            event: "pre-tool-use".into(),
+            payload: real_pre_tool_use_payload("s1", "Bash", "toolu_1"),
+        };
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
+            .await;
+        assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Working);
+
+        // Claude Code is about to show the approval dialog.
+        let event = HookEvent {
+            event: "permission-request".into(),
+            payload: real_permission_request_payload("s1", "Bash", "toolu_1"),
+        };
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
+            .await;
+        assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Waiting);
+        assert!(waiting_sessions.lock().await.contains("s1"), "PermissionRequest should durably record the wait");
+
+        // User approves quickly; the tool runs and PostToolUse fires, resolving the wait.
+        let event = HookEvent {
+            event: "post-tool-use".into(),
+            payload: real_pre_tool_use_payload("s1", "Bash", "toolu_1"),
+        };
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
+            .await;
+        assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Working);
+        assert!(
+            !waiting_sessions.lock().await.contains("s1"),
+            "resolving the approval should evict the durable wait record"
         );
     }
 
@@ -1372,12 +1834,13 @@ mod tests {
         let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
         let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let event = HookEvent {
             event: "notification".into(),
             payload: real_notification_payload("s1", "idle_prompt"),
         };
-        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions)
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
             .await;
 
         assert_eq!(
@@ -1437,12 +1900,13 @@ mod tests {
         let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
         let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let event = HookEvent {
             event: "notification".into(),
             payload: real_notification_payload("s1", "permission_prompt"),
         };
-        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions)
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
             .await;
 
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Waiting);
@@ -1485,9 +1949,10 @@ mod tests {
         let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
         let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let event = HookEvent { event: "stop".into(), payload: real_stop_payload("s1", "end_turn") };
-        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions)
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
             .await;
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Done);
 
@@ -1495,7 +1960,7 @@ mod tests {
             event: "pre-tool-use".into(),
             payload: real_pre_tool_use_payload("s1", "Bash", "toolu_1"),
         };
-        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions)
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
             .await;
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Working);
     }
@@ -1580,9 +2045,10 @@ mod tests {
         let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
         let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let event = HookEvent { event: "session-end".into(), payload: real_session_end_payload("s1", "other") };
-        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions)
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
             .await;
 
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Done);
@@ -1620,6 +2086,7 @@ mod tests {
         let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
         let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
         ended_sessions.lock().await.mark_ended("s1".to_string());
         assert!(ended_sessions.lock().await.contains("s1"));
 
@@ -1629,7 +2096,7 @@ mod tests {
             event: "pre-tool-use".into(),
             payload: real_pre_tool_use_payload("s1", "AskUserQuestion", "toolu_1"),
         };
-        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions)
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
             .await;
 
         assert!(!ended_sessions.lock().await.contains("s1"), "the hook should evict the stale ended-record");
@@ -1664,8 +2131,9 @@ mod tests {
             ..OrchestratorConfig::default()
         });
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let missing_path = transcript_path(claude_dir.path(), "/Users/omricohen", session_id);
@@ -1720,6 +2188,7 @@ mod tests {
         let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
         let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         // Simulate a `stop` (or a duplicate `session-start` delivery) already
         // having tailed this exact file to EOF before the real `session-start`
@@ -1733,7 +2202,7 @@ mod tests {
             event: "session-start".into(),
             payload: real_session_start_payload(session_id, cwd, &path, "startup"),
         };
-        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions)
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
             .await;
 
         let snapshot = engine.snapshot().await;
@@ -1783,8 +2252,9 @@ mod tests {
             ..OrchestratorConfig::default()
         });
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let refresh_prompt = format!(
@@ -1879,8 +2349,9 @@ mod tests {
             ..OrchestratorConfig::default()
         });
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let send = |event: &str| {

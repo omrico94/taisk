@@ -34,6 +34,74 @@
   gap: 6px;
 }
 
+.deleteCategoryButton {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 5px;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.lane:hover .deleteCategoryButton {
+  opacity: 0.6;
+}
+
+.deleteCategoryButton:hover {
+  opacity: 1 !important;
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.deleteConfirmRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 3px;
+  max-width: 132px;
+}
+
+.deleteConfirmButton {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #f87171;
+  border: 1px solid #f87171;
+  color: #2a0a0a;
+  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.deleteConfirmButton:hover {
+  background: #fca5a5;
+}
+
+.deleteCancelButton {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .chevron {
   font-size: 10px;
   color: var(--text-faint);

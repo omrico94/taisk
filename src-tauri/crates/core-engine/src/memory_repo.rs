@@ -70,6 +70,11 @@ pub struct Memory {
     pub cwd: String,
     pub tool: String,
     pub category: String,
+    /// The session's LLM-generated title (from `categorize_session`), stored
+    /// durably so `orchestrator::reconstruct_live_sessions` can restore the
+    /// real title on restart instead of falling back to a crude truncation
+    /// of `text` — see that function's doc comment for the bug this fixed.
+    pub title: String,
     pub created_at: i64,
 }
 
@@ -119,6 +124,7 @@ fn memories_schema() -> SchemaRef {
         Field::new("cwd", DataType::Utf8, false),
         Field::new("tool", DataType::Utf8, false),
         Field::new("category", DataType::Utf8, false),
+        Field::new("title", DataType::Utf8, false),
         Field::new("created_at", DataType::Int64, false),
     ]))
 }
@@ -154,6 +160,7 @@ fn memory_to_batch(m: &Memory) -> RecordBatch {
             Arc::new(StringArray::from(vec![m.cwd.clone()])),
             Arc::new(StringArray::from(vec![m.tool.clone()])),
             Arc::new(StringArray::from(vec![m.category.clone()])),
+            Arc::new(StringArray::from(vec![m.title.clone()])),
             Arc::new(Int64Array::from(vec![m.created_at])),
         ],
     )
@@ -246,6 +253,7 @@ fn rows_to_memories(batch: &RecordBatch) -> Vec<Memory> {
     let cwds = extract_string_col(batch, "cwd");
     let tools = extract_string_col(batch, "tool");
     let categories = extract_string_col(batch, "category");
+    let titles = extract_string_col(batch, "title");
     let created_ats = extract_i64_col(batch, "created_at");
 
     (0..batch.num_rows())
@@ -259,6 +267,7 @@ fn rows_to_memories(batch: &RecordBatch) -> Vec<Memory> {
             cwd: cwds[i].clone(),
             tool: tools[i].clone(),
             category: categories[i].clone(),
+            title: titles[i].clone(),
             created_at: created_ats[i],
         })
         .collect()
@@ -465,6 +474,20 @@ impl MemoryRepo {
         table.delete(&predicate).await?;
         Ok(())
     }
+
+    /// Removes a category's exemplar row (the board's "Delete category"
+    /// action) so it stops appearing as a known lane. Deliberately doesn't
+    /// touch `memories` — the historical prompt/summary rows that were once
+    /// tagged with this category stay searchable via Ask Memory; only the
+    /// live cascade (removing each currently-live session in the category)
+    /// is the caller's job (`api::delete_category`), same separation as
+    /// single-session delete leaving `memories` alone.
+    pub async fn delete_exemplar(&self, category: &str) -> lancedb::Result<()> {
+        let table = self.db.open_table(EXEMPLARS_TABLE).execute().await?;
+        let predicate = format!("category = '{}'", category.replace('\'', "''"));
+        table.delete(&predicate).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -513,6 +536,7 @@ mod tests {
             cwd: "/Users/omricohen/api-gateway".into(),
             tool: "Claude Code".into(),
             category: "Backend / API".into(),
+            title: "Refactor auth middleware".into(),
             created_at: 0,
         };
         repo.upsert_memory(&m).await.unwrap();
@@ -537,6 +561,7 @@ mod tests {
             cwd: "/Users/omricohen/api-gateway".into(),
             tool: "Claude Code".into(),
             category: "Backend / API".into(),
+            title: "Refactor auth middleware".into(),
             created_at: 1_700_000_000_000,
         };
         repo.upsert_memory(&m).await.unwrap();
@@ -621,6 +646,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_exemplar_removes_only_the_named_category_and_leaves_memories_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = MemoryRepo::open(dir.path().to_str().unwrap()).await.unwrap();
+
+        repo.create_category("Ops / Infra", vec_of(EMBEDDING_DIM, 1.0), 42).await.unwrap();
+        repo.create_category("Backend / API", vec_of(EMBEDDING_DIM, -1.0), 43).await.unwrap();
+        repo.upsert_memory(&Memory {
+            id: "a".into(),
+            session_id: "a".into(),
+            kind: MemoryKind::Prompt,
+            text: "x".into(),
+            embedding: vec_of(EMBEDDING_DIM, 1.0),
+            project: "proj-1".into(),
+            cwd: "/Users/omricohen/proj-1".into(),
+            tool: "Claude Code".into(),
+            category: "Ops / Infra".into(),
+            title: "x".into(),
+            created_at: 0,
+        })
+        .await
+        .unwrap();
+
+        repo.delete_exemplar("Ops / Infra").await.unwrap();
+
+        let exemplars = repo.list_exemplars().await.unwrap();
+        assert_eq!(exemplars.len(), 1, "only the named category's exemplar should be removed");
+        assert_eq!(exemplars[0].category, "Backend / API");
+
+        let memories = repo.list_session_memories().await.unwrap();
+        assert_eq!(memories.len(), 1, "historical memory rows must survive a category delete");
+        assert_eq!(memories[0].category, "Ops / Infra");
+    }
+
+    #[tokio::test]
     async fn purge_by_project_and_all() {
         let dir = tempfile::tempdir().unwrap();
         let repo = MemoryRepo::open(dir.path().to_str().unwrap()).await.unwrap();
@@ -636,6 +695,7 @@ mod tests {
                 cwd: format!("/Users/omricohen/{project}"),
                 tool: "Claude Code".into(),
                 category: "Backend / API".into(),
+                title: "x".into(),
                 created_at: 0,
             })
             .await

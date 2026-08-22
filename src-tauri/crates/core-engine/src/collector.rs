@@ -343,6 +343,10 @@ pub fn extract_usage_metrics(path: &Path) -> Option<UsageMetrics> {
 pub struct SubagentInfo {
     pub id: String,
     pub title: String,
+    /// A short, truncated summary of what was *delegated* to this
+    /// subagent (its own initiating prompt, or the parent's description) —
+    /// never the subagent's raw output, which can be an arbitrarily long
+    /// final report. See `SUBAGENT_DESC_CHAR_LIMIT`.
     pub desc: String,
     /// `"Working"` or `"Done"` — deliberately not the full `SessionState`
     /// enum. Subagents don't get Waiting/Idle: there's no hook to detect
@@ -360,6 +364,29 @@ pub struct SubagentInfo {
 /// subagents are typically short-lived, focused sub-tasks rather than
 /// hours-long interactive sessions.
 const SUBAGENT_ACTIVE_WINDOW_SECS: u64 = 120;
+
+/// Cap on `SubagentInfo.desc`'s length. User report: a completed
+/// subagent's card was rendering its entire final report — a multi-
+/// paragraph wall of text — because `desc` used to be the subagent's raw
+/// latest transcript activity, unbounded. `desc` must stay a short "what
+/// was delegated" summary, not a dump of what the subagent produced.
+const SUBAGENT_DESC_CHAR_LIMIT: usize = 120;
+
+/// Collapses to a single line and truncates to `limit` chars at a word
+/// boundary where possible, so a long prompt/description reads as a
+/// clean short summary instead of cutting off mid-word.
+fn truncate_for_display(s: &str, limit: usize) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= limit {
+        return collapsed;
+    }
+    let mut truncated: String = collapsed.chars().take(limit).collect();
+    if let Some(last_space) = truncated.rfind(' ') {
+        truncated.truncate(last_space);
+    }
+    truncated.push('…');
+    truncated
+}
 
 /// Lists every subagent spawned by `parent_session_id`, reading directly
 /// from `<claude_projects_dir>/<sanitized-cwd>/<parent_session_id>/subagents/`.
@@ -394,7 +421,6 @@ pub fn list_subagents(claude_projects_dir: &Path, cwd: &str, parent_session_id: 
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
         let lines: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
         let prompt = extract_initiating_prompt(&lines);
-        let activity = extract_latest_activity(&lines);
 
         // Prefer the parent's own description of why it spawned this
         // subagent (real, human-authored context) over the subagent's own
@@ -404,7 +430,18 @@ pub fn list_subagents(claude_projects_dir: &Path, cwd: &str, parent_session_id: 
             Some(s) => s.split_whitespace().take(4).collect::<Vec<_>>().join(" "),
             None => "Subagent".to_string(),
         };
-        let desc = activity.or(prompt).unwrap_or_else(|| description.clone());
+
+        // `desc` describes what was delegated to this subagent, not what it
+        // produced — the subagent's own initiating prompt is the actual
+        // task text, so it's preferred over the (usually shorter, already
+        // reflected in `title`) parent-authored description. Never the
+        // subagent's latest/final transcript activity: that can be an
+        // arbitrarily long final report, not a task summary.
+        let desc_source = prompt.filter(|p| !p.is_empty()).or_else(|| (!description.is_empty()).then(|| description.clone()));
+        let desc = match desc_source {
+            Some(s) => truncate_for_display(&s, SUBAGENT_DESC_CHAR_LIMIT),
+            None => "Subagent".to_string(),
+        };
 
         let is_active = std::fs::metadata(&path)
             .and_then(|m| m.modified())
@@ -738,10 +775,45 @@ mod tests {
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].id, "abc");
         assert_eq!(subs[0].title, "Investigate flaky CI test");
+        // Regression: desc must describe the delegated task (the
+        // subagent's own initiating prompt), not its final transcript
+        // activity ("Investigating retries in the CI log").
+        assert_eq!(subs[0].desc, "Find the flaky test");
         assert_eq!(subs[0].tokens, 50 + 100);
         assert_eq!(subs[0].ctx_max, 1_000_000);
         // Just written, so mtime is fresh — must read as still active.
         assert_eq!(subs[0].state, "Working");
+    }
+
+    /// Regression (user report — a completed subagent's card rendered as a
+    /// multi-paragraph wall of text): `desc` must never be the subagent's
+    /// raw final output, and must always stay short.
+    #[test]
+    fn list_subagents_desc_is_delegated_task_not_raw_final_output_and_is_truncated() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = "/x";
+        let subs_dir = root.path().join(sanitize_cwd(cwd)).join("parent-1").join("subagents");
+        std::fs::create_dir_all(&subs_dir).unwrap();
+
+        let long_prompt = "Explore the codebase to find every reference to the legacy auth ".repeat(5);
+        let long_final_report = "## Findings\n\n".to_string() + &"This is a very long final report line. ".repeat(50);
+        std::fs::write(
+            subs_dir.join("agent-long.jsonl"),
+            serde_json::json!({"type":"user","message":{"role":"user","content": long_prompt}}).to_string()
+                + "\n"
+                + &(serde_json::json!({"type":"assistant","message":{"content": long_final_report}}).to_string() + "\n"),
+        )
+        .unwrap();
+
+        let subs = list_subagents(root.path(), cwd, "parent-1");
+        assert_eq!(subs.len(), 1);
+        assert!(
+            subs[0].desc.chars().count() <= SUBAGENT_DESC_CHAR_LIMIT + 1, // +1 for the trailing ellipsis char
+            "desc must stay short, got {} chars",
+            subs[0].desc.chars().count()
+        );
+        assert!(subs[0].desc.starts_with("Explore the codebase"), "desc should reflect the delegated task, got: {}", subs[0].desc);
+        assert!(!subs[0].desc.contains("Findings"), "desc must not contain the subagent's final report content");
     }
 
     #[test]

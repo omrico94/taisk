@@ -10,12 +10,17 @@ use serde_json::{Value, json};
 /// (settings.json event key, hook-bridge argv suffix). `PreToolUse`/
 /// `PostToolUse` and `Notification`/`Stop`/`SessionEnd` are the events the
 /// state machine (see `state.rs`) actually reacts to; `SessionStart` is how a
-/// new session is registered in the first place.
+/// new session is registered in the first place. `PermissionRequest` drives
+/// `Waiting` the instant Claude Code is about to show an approval dialog —
+/// see its handling in `orchestrator.rs` for why `Notification`'s
+/// `permission_prompt` type alone isn't good enough (it's gated behind ~6s
+/// of user inactivity, so most approvals never trigger it at all).
 pub const HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("Notification", "notification"),
     ("PreToolUse", "pre-tool-use"),
     ("PostToolUse", "post-tool-use"),
+    ("PermissionRequest", "permission-request"),
     ("Stop", "stop"),
     ("SessionEnd", "session-end"),
 ];

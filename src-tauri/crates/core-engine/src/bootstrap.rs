@@ -15,7 +15,7 @@ use crate::categorize::CategorizationConfig;
 use crate::engine::EngineHandle;
 use crate::memory_repo::MemoryRepo;
 use crate::ollama::OllamaClient;
-use crate::orchestrator::{self, OrchestratorConfig, WaitingSessions};
+use crate::orchestrator::{self, DismissedSessions, OrchestratorConfig, WaitingSessions};
 
 pub struct BootstrapOptions {
     /// Path to the `hook-bridge` binary to register in
@@ -44,6 +44,11 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
     // evict the same durable "waiting" record a real hook resolution would
     // (see `AppState::waiting_sessions`'s doc comment).
     let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+    // Same reasoning as `waiting_sessions` above: a delete from the board
+    // (once wired up) has to evict the same durable record a real hook
+    // resolution would, so it's shared here rather than owned solely by the
+    // orchestrator.
+    let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
     tokio::spawn(crate::engine::run_idle_sweeper(engine.clone(), orch_config.idle_ttl, orch_config.idle_sweep_interval));
     tokio::spawn(orchestrator::run(
@@ -53,6 +58,7 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
         cat_config.clone(),
         orch_config,
         waiting_sessions.clone(),
+        dismissed_sessions.clone(),
     ));
 
     Ok(AppState {
@@ -62,5 +68,6 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
         config: cat_config,
         claude_projects_dir: crate::first_run::claude_projects_dir(),
         waiting_sessions,
+        dismissed_sessions,
     })
 }
