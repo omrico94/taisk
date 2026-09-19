@@ -12,10 +12,10 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 
 use crate::categorize::CategorizationConfig;
@@ -24,6 +24,7 @@ use crate::engine::{EngineCommand, EngineHandle, SessionView};
 use crate::memory_repo::{MemoryRepo, PurgeScope};
 use crate::ollama::OllamaClient;
 use crate::orchestrator::{DismissedSessions, WaitingSessions};
+use crate::tasks::{Stage, Task, TaskHub, TasksSnapshot};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -43,12 +44,17 @@ pub struct AppState {
     /// session just reappears on the next restart (see
     /// `DismissedSessions`'s doc comment).
     pub dismissed_sessions: Arc<Mutex<DismissedSessions>>,
+    /// Kanban tasks + session→task assignments (see `tasks.rs`).
+    pub tasks: TaskHub,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/sessions", get(get_sessions))
         .route("/events", get(ws_events))
+        .route("/tasks", get(get_tasks).post(create_task))
+        .route("/tasks/{id}", patch(update_task).delete(delete_task))
+        .route("/sessions/{id}/task", put(assign_session))
         .route("/sessions/{id}/approve", post(approve))
         .route("/sessions/{id}/reject", post(reject))
         .route("/sessions/{id}/reply", post(reply))
@@ -76,13 +82,89 @@ async fn ws_events(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl 
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
+/// Multiplexes the two live streams onto one socket: session diffs
+/// (`{"Upserted": …}` / `{"Removed": …}`) and full task snapshots
+/// (`{"TasksChanged": {tasks, assignments}}`). The frontend discriminates on
+/// the single top-level key.
 async fn handle_ws(mut socket: WebSocket, state: AppState) {
-    let mut rx = state.engine.subscribe();
-    while let Ok(diff) = rx.recv().await {
-        let Ok(text) = serde_json::to_string(&diff) else { continue };
+    let mut diffs = state.engine.subscribe();
+    let mut tasks = state.tasks.subscribe();
+    loop {
+        let text = tokio::select! {
+            diff = diffs.recv() => match diff {
+                Ok(diff) => serde_json::to_string(&diff),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            },
+            snap = tasks.recv() => match snap {
+                Ok(snap) => serde_json::to_string(&serde_json::json!({ "TasksChanged": snap })),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            },
+        };
+        let Ok(text) = text else { continue };
         if socket.send(Message::Text(text.into())).await.is_err() {
             break;
         }
+    }
+}
+
+async fn get_tasks(State(state): State<AppState>) -> Json<TasksSnapshot> {
+    Json(state.tasks.snapshot().await)
+}
+
+#[derive(Deserialize)]
+struct CreateTaskBody {
+    title: String,
+    stage: Stage,
+}
+
+async fn create_task(State(state): State<AppState>, Json(body): Json<CreateTaskBody>) -> Result<Json<Task>, StatusCode> {
+    state.tasks.create(&body.title, body.stage).await.map(Json).ok_or(StatusCode::BAD_REQUEST)
+}
+
+#[derive(Deserialize)]
+struct UpdateTaskBody {
+    title: Option<String>,
+    stage: Option<Stage>,
+}
+
+async fn update_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateTaskBody>,
+) -> StatusCode {
+    if state.tasks.update(&id, body.title.as_deref(), body.stage).await {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+async fn delete_task(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
+    if state.tasks.delete(&id).await {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+#[derive(Deserialize)]
+struct AssignBody {
+    task_id: Option<String>,
+}
+
+/// Assign a session to a task, or unassign it with `task_id: null`.
+async fn assign_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AssignBody>,
+) -> StatusCode {
+    let sessions = state.engine.snapshot().await;
+    if state.tasks.assign(&id, body.task_id.as_deref(), &sessions).await {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
     }
 }
 
@@ -149,6 +231,7 @@ async fn delete_session(State(state): State<AppState>, Path(id): Path<String>) -
         let _ = dismissed.save();
     }
     unmark_waiting(&state, &id).await;
+    state.tasks.forget_session(&id).await;
     state.engine.dispatch(EngineCommand::RemoveSession { id }).await;
     StatusCode::OK
 }
@@ -338,6 +421,7 @@ mod tests {
         let app_dir = tempfile::tempdir().unwrap();
         let waiting_sessions_path = app_dir.path().join("waiting-sessions.json");
         let dismissed_sessions_path = app_dir.path().join("dismissed-sessions.json");
+        let app_dir_path = app_dir.path().to_path_buf();
         // Leak the tempdirs so they aren't cleaned up while the server is
         // running for the lifetime of the test.
         std::mem::forget(lance_dir);
@@ -352,6 +436,7 @@ mod tests {
             claude_projects_dir,
             waiting_sessions: Arc::new(Mutex::new(WaitingSessions::load(&waiting_sessions_path))),
             dismissed_sessions: Arc::new(Mutex::new(DismissedSessions::load(&dismissed_sessions_path))),
+            tasks: TaskHub::load(&app_dir_path.join("tasks.json")),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -432,6 +517,73 @@ mod tests {
         assert_eq!(value["Upserted"]["id"], "s1");
 
         ws_stream.close(None).await.ok();
+    }
+
+    #[tokio::test]
+    async fn tasks_crud_assign_unassign_and_delete_orphans_sessions() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        // Blank title rejected.
+        let r = client.post(format!("{base}/tasks")).json(&serde_json::json!({"title": " ", "stage": "todo"})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+
+        let task: Task = client
+            .post(format!("{base}/tasks"))
+            .json(&serde_json::json!({"title": "Ship auth", "stage": "todo"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(task.stage, Stage::Todo);
+
+        let r = client.patch(format!("{base}/tasks/{}", task.id)).json(&serde_json::json!({"stage": "inprogress"})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = client.patch(format!("{base}/tasks/nope")).json(&serde_json::json!({"stage": "done"})).send().await.unwrap();
+        assert_eq!(r.status(), 404);
+
+        // Assign, then reject an unknown task, then unassign.
+        let r = client.put(format!("{base}/sessions/s1/task")).json(&serde_json::json!({"task_id": task.id})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = client.put(format!("{base}/sessions/s1/task")).json(&serde_json::json!({"task_id": "nope"})).send().await.unwrap();
+        assert_eq!(r.status(), 404);
+        let snap: TasksSnapshot = client.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(snap.tasks[0].stage, Stage::InProgress);
+        assert_eq!(snap.assignments.get("s1"), Some(&task.id));
+        client.put(format!("{base}/sessions/s1/task")).json(&serde_json::json!({"task_id": null})).send().await.unwrap();
+        assert!(state.tasks.snapshot().await.assignments.is_empty());
+
+        // Deleting a task drops its assignments; deleting a session drops its own.
+        client.put(format!("{base}/sessions/s2/task")).json(&serde_json::json!({"task_id": task.id})).send().await.unwrap();
+        client.delete(format!("{base}/sessions/s2")).send().await.unwrap();
+        assert!(state.tasks.snapshot().await.assignments.is_empty());
+        client.put(format!("{base}/sessions/s3/task")).json(&serde_json::json!({"task_id": task.id})).send().await.unwrap();
+        assert_eq!(client.delete(format!("{base}/tasks/{}", task.id)).send().await.unwrap().status(), 200);
+        let snap = state.tasks.snapshot().await;
+        assert!(snap.tasks.is_empty() && snap.assignments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ws_delivers_tasks_changed_snapshots() {
+        let (base, _state) = spawn_test_server().await;
+        let ws_url = base.replace("http://", "ws://") + "/events";
+        let (mut ws_stream, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        reqwest::Client::new()
+            .post(format!("{base}/tasks"))
+            .json(&serde_json::json!({"title": "A", "stage": "backlog"}))
+            .send()
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), ws_stream.next()).await.unwrap().unwrap().unwrap();
+        let WsMessage::Text(text) = msg else { panic!("expected text") };
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["TasksChanged"]["tasks"][0]["title"], "A");
+        assert_eq!(value["TasksChanged"]["tasks"][0]["stage"], "backlog");
     }
 
     #[tokio::test]
