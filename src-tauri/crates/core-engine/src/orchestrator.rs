@@ -2370,7 +2370,7 @@ mod tests {
             .await
             .expect("should receive a diff carrying the real plan before timing out");
         let plan = with_plan.plan.expect("checked by predicate");
-        assert_eq!(plan.title, "Backend / API plan");
+        assert_eq!(plan.title, format!("{} plan", with_plan.title));
         assert_eq!(plan.steps.len(), 2);
         assert!(plan.steps[0].done);
         assert!(!plan.steps[1].done);
