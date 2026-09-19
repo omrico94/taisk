@@ -14,7 +14,7 @@ export function StatusPill({ workingCount, waitingCount }: Props) {
       <span className={styles.divider}>·</span>
       <span className={`${styles.dot} ${styles.waitingDot}`} />
       <span className={styles.count}>{waitingCount}</span>
-      <span className={styles.label}>waiting</span>
+      <span className={styles.label}>need you</span>
     </div>
   );
 }

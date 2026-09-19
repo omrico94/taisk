@@ -1,14 +1,11 @@
 import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
-import { useShallow } from "zustand/react/shallow";
 import { useSessionStore } from "../store/sessionStore";
 import type { SessionState } from "../types";
 import {
   approveSession,
   deleteSession,
   getTranscript,
-  recategorizeSession,
   rejectSession,
   replySession,
   type TranscriptRow,
@@ -24,13 +21,8 @@ import {
   planPercent,
   toolColorVar,
 } from "../styles/sessionStyle";
-import styles from "./DetailDrawer.module.css";
-
-// Matches the design's `slideIn` spec exactly (.42s cubic-bezier(.22,1,.36,1)
-// from translateX(26px)+opacity 0). Framer Motion here instead of the CSS
-// keyframe used elsewhere (breathe/waitGlow) so entrance motion is expressed
-// in one system rather than two (plan §8).
-const DRAWER_TRANSITION = { duration: 0.42, ease: [0.22, 1, 0.36, 1] as const };
+import { moveSession } from "./boardActions";
+import styles from "./SessionOverlay.module.css";
 
 const ROLE_COLOR: Record<string, string> = {
   You: "#7cc5ff",
@@ -42,15 +34,16 @@ interface Props {
   nowMs: number;
 }
 
-export function DetailDrawer({ nowMs }: Props) {
+export function SessionOverlay({ nowMs }: Props) {
   const selectedId = useSessionStore((s) => s.selectedId);
   const session = useSessionStore((s) => (s.selectedId ? s.sessions[s.selectedId] : undefined));
   const selectCard = useSessionStore((s) => s.selectCard);
   const replyText = useSessionStore((s) => s.replyText);
   const setReplyText = useSessionStore((s) => s.setReplyText);
-  const knownCategories = useSessionStore(
-    useShallow((s) => Array.from(new Set(Object.values(s.sessions).map((x) => x.category)))),
-  );
+  const taskTitle = useSessionStore((s) => {
+    const tid = s.selectedId ? s.assignments[s.selectedId] : undefined;
+    return s.tasks.find((t) => t.id === tid)?.title ?? null;
+  });
 
   const [transcript, setTranscript] = useState<TranscriptRow[]>([]);
   // Arm/confirm state for the delete button (see `del` below) — deliberately
@@ -124,22 +117,16 @@ export function DetailDrawer({ nowMs }: Props) {
     selectCard(null);
   };
 
-  // FR9 manual override: cycle to the next known category. This is what
-  // actually exercises the "cards physically move between swimlanes"
-  // motion (plan §8/§9) — Board re-groups once the WS diff lands and the
-  // card's layoutId carries it smoothly to its new lane.
-  const recategorize = () => {
-    const others = knownCategories.filter((c) => c !== session.category && c !== "Uncategorized");
-    const next = others[0] ?? "General";
-    recategorizeSession(session.id, next);
-  };
-
   // Phase 2 roadmap item 6: only a CLI-originated session (a plain terminal
   // `claude` invocation) can be reattached to via `claude --resume <id>`.
   // There's no known deep-link for a specific Claude Desktop tab, so that
   // case gets an honest disabled button instead of a fallback gesture that
   // looks session-specific but isn't.
   const canJump = session.entrypoint === "cli";
+  const unassign = () => {
+    moveSession(session.id, null);
+    selectCard(null);
+  };
   const jumpToSession = () => {
     invoke("jump_to_cli_session", { cwd: session.cwd, sessionId: session.id }).catch((err) =>
       console.error("Failed to jump to session:", err),
@@ -147,12 +134,8 @@ export function DetailDrawer({ nowMs }: Props) {
   };
 
   return (
-    <motion.div
-      className={styles.drawer}
-      initial={{ x: 26, opacity: 0 }}
-      animate={{ x: 0, opacity: 1 }}
-      transition={DRAWER_TRANSITION}
-    >
+    <div className={styles.scrim} data-testid="session-overlay" onClick={() => selectCard(null)}>
+    <div className={styles.panel} role="dialog" aria-label={session.title} onClick={(e) => e.stopPropagation()}>
       <div className={styles.header}>
         <span className={styles.statePill} style={{ color, border: `1px solid ${color}` }}>
           <span className={styles.dot} style={{ background: color }} />
@@ -160,6 +143,11 @@ export function DetailDrawer({ nowMs }: Props) {
         </span>
         <span className={styles.spacer} />
         <span className={styles.elapsed}>{formatElapsed(session.started_at_ms, nowMs)}</span>
+        {taskTitle && (
+          <button className={styles.unassignButton} onClick={unassign} title="Send this session back to the tray">
+            ↩ Unassign
+          </button>
+        )}
         {confirmingDelete && (
           <button className={styles.deleteCancelButton} onClick={() => setConfirmingDelete(false)}>
             Cancel
@@ -170,7 +158,7 @@ export function DetailDrawer({ nowMs }: Props) {
           onClick={del}
           title={confirmingDelete ? "Click again to permanently delete" : "Delete this session from the board"}
         >
-          {confirmingDelete ? "Confirm delete" : "🗑"}
+          {confirmingDelete ? "Confirm delete" : "Delete session"}
         </button>
         <button className={styles.closeButton} onClick={() => selectCard(null)}>
           ✕
@@ -184,6 +172,11 @@ export function DetailDrawer({ nowMs }: Props) {
         </div>
         <div className={styles.titleLine}>{session.title}</div>
         <div className={styles.descLine}>{session.desc}</div>
+        {taskTitle && (
+          <div className={styles.taskCaption}>
+            part of task <strong>{taskTitle}</strong>
+          </div>
+        )}
       </div>
 
       {session.ctx_max > 0 && (
@@ -290,13 +283,6 @@ export function DetailDrawer({ nowMs }: Props) {
         </div>
       )}
 
-      <div className={styles.memoryChip}>
-        <span className={styles.memoryChipIcon}>✦</span>
-        <span className={styles.memoryChipText}>
-          In <strong className={styles.memoryChipStrong}>{session.category}</strong>
-        </span>
-      </div>
-
       <div className={styles.transcript}>
         <div className={styles.transcriptLabel}>Transcript tail</div>
         <div className={styles.transcriptRows}>
@@ -335,7 +321,7 @@ export function DetailDrawer({ nowMs }: Props) {
         <div className={styles.footer}>
           {canJump ? (
             <button className={styles.jumpButton} onClick={jumpToSession}>
-              Jump to session ↗
+              Jump into this session ↗
             </button>
           ) : (
             <button
@@ -343,14 +329,12 @@ export function DetailDrawer({ nowMs }: Props) {
               disabled
               title="This session was started from Claude Desktop — there's no way to jump to a specific Desktop tab yet."
             >
-              Jump to session ↗
+              Jump into this session ↗
             </button>
           )}
-          <button className={styles.recatButton} onClick={recategorize}>
-            Re-categorize
-          </button>
         </div>
       )}
-    </motion.div>
+    </div>
+    </div>
   );
 }

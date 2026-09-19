@@ -1,4 +1,4 @@
-import type { SearchResult, SessionView } from "./types";
+import type { SearchResult, SessionView, Stage, Task, TasksSnapshot } from "./types";
 
 // Matches src-tauri/src/lib.rs's API_PORT constant — the desktop app's own
 // Core Engine instance. A future Phase-3 VS Code extension would need real
@@ -41,37 +41,42 @@ export async function deleteSession(id: string): Promise<void> {
   await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function recategorizeSession(id: string, category: string): Promise<void> {
-  await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}/recategorize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ category }),
-  });
-}
-
-export async function getCategories(): Promise<string[]> {
-  const resp = await fetch(`${API_BASE}/categories`);
+export async function getTasks(): Promise<TasksSnapshot> {
+  const resp = await fetch(`${API_BASE}/tasks`);
   return resp.json();
 }
 
-/** Throws on a rejected (e.g. blank-name) request so callers can surface it. */
-export async function createCategory(name: string): Promise<void> {
-  const resp = await fetch(`${API_BASE}/categories`, {
+/** Throws on a rejected (e.g. blank-title) request so callers can surface it. */
+export async function createTask(title: string, stage: Stage): Promise<Task> {
+  const resp = await fetch(`${API_BASE}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ title, stage }),
   });
-  if (!resp.ok) {
-    throw new Error(`Failed to create category "${name}" (${resp.status})`);
-  }
+  if (!resp.ok) throw new Error(`Failed to create task "${title}" (${resp.status})`);
+  return resp.json();
 }
 
-/** Cascades server-side: every live session currently in this category is
- * durably deleted too (see the backend's `delete_category`), so removed
- * cards arrive here the same way a single-session delete does — over the
- * WS diff stream — rather than needing to be filtered out locally. */
-export async function deleteCategory(name: string): Promise<void> {
-  await fetch(`${API_BASE}/categories/${encodeURIComponent(name)}`, { method: "DELETE" });
+export async function updateTask(id: string, patch: { title?: string; stage?: Stage }): Promise<void> {
+  await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+/** Its sessions become unassigned (they return to the tray). */
+export async function deleteTask(id: string): Promise<void> {
+  await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** `taskId: null` unassigns the session (back to the tray). */
+export async function assignSession(sessionId: string, taskId: string | null): Promise<void> {
+  await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/task`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+  });
 }
 
 export async function search(query: string): Promise<SearchResult[]> {

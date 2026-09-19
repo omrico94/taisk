@@ -10,9 +10,8 @@ export interface SessionView {
   project: string;
   cwd: string;
   entrypoint: string;
-  category: string;
   state: SessionState;
-  /** Short, stable session name — set once at categorization time. */
+  /** Short, stable session name — set once at summary time. */
   title: string;
   /** Live, changing "what's happening right now" line (was `task` in Phase 1). */
   desc: string;
@@ -52,13 +51,29 @@ export interface PlanView {
   steps: PlanStep[];
 }
 
-export type SessionDiff = { Upserted: SessionView } | { Removed: string };
+export type Stage = "backlog" | "todo" | "inprogress" | "done";
+
+export interface Task {
+  id: string;
+  title: string;
+  stage: Stage;
+  created_at_ms: number;
+}
+
+/** session id → task id. A session absent from the map is unassigned. */
+export interface TasksSnapshot {
+  tasks: Task[];
+  assignments: Record<string, string>;
+}
+
+/** One WS message: a session diff, or a full snapshot of tasks/assignments
+ * (the backend owns both, incl. the Done rollup — see `tasks.rs`). */
+export type BoardMessage = { Upserted: SessionView } | { Removed: string } | { TasksChanged: TasksSnapshot };
 
 export interface SearchResult {
   text: string;
   project: string;
   tool: string;
-  category: string;
   session_id: string;
   distance: number;
   live: boolean;

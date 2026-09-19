@@ -24,3 +24,9 @@
 @keyframes orbitTrail {
   to { stroke-dashoffset: -964.4; }
 }
+
+/* Session-detail overlay entrance (design: scale .96 + fade, .3s settle). */
+@keyframes overlayIn {
+  from { transform: scale(0.96); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}

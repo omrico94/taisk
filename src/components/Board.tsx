@@ -1,115 +1,69 @@
-import { useState } from "react";
-import { useSessionStore } from "../store/sessionStore";
+import { useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { createCategory } from "../api";
-import { groupByCategory, matchesQuery } from "../store/selectors";
-import { Swimlane } from "./Swimlane";
-import styles from "./Board.module.css";
+import { useSessionStore } from "../store/sessionStore";
+import { STAGES, matchesQuery, orphanSessions, sessionsOfTask } from "../store/selectors";
+import { Column } from "./Column";
+import { UnassignedTray } from "./UnassignedTray";
+import { useFlip } from "./useFlip";
+import styles from "./Kanban.module.css";
 
-interface Props {
-  nowMs: number;
-}
-
-export function Board({ nowMs }: Props) {
-  const sessions = useSessionStore(useShallow((s) => Object.values(s.sessions)));
-  const categories = useSessionStore(useShallow((s) => s.categories));
+export function Board() {
+  const sessionsMap = useSessionStore(useShallow((s) => s.sessions));
+  const tasks = useSessionStore(useShallow((s) => s.tasks));
+  const assignments = useSessionStore(useShallow((s) => s.assignments));
   const query = useSessionStore((s) => s.query);
-  const selectCard = useSessionStore((s) => s.selectCard);
-  const openAskWithQuery = useSessionStore((s) => s.openAskWithQuery);
   const hideIdle = useSessionStore((s) => s.hideIdle);
+  const drag = useSessionStore((s) => s.drag);
+  const openAskWithQuery = useSessionStore((s) => s.openAskWithQuery);
 
+  const rootRef = useRef<HTMLDivElement>(null);
+  useFlip(rootRef);
+
+  const sessions = Object.values(sessionsMap);
   const hasQuery = query.trim() !== "";
-  const visible = hideIdle ? sessions.filter((s) => s.state !== "Idle") : sessions;
-  const filtered = visible.filter((s) => matchesQuery(s, query));
-  const allGroups = groupByCategory(filtered, categories);
-  // Empty lanes stay visible so there's always somewhere to drag a session
-  // into — but hide during an active search, matching the design's
-  // `groupByCatDeep` (a query narrows the board down to actual matches).
-  const groups = hasQuery ? allGroups.filter((g) => g.sessions.length > 0) : allGroups;
-  const noResults = hasQuery && groups.length === 0;
+
+  // A query narrows the board: a task stays if its title or any of its
+  // sessions match; the tray shows only matching orphans.
+  const visibleTasks = hasQuery
+    ? tasks.filter(
+        (t) =>
+          t.title.toLowerCase().includes(query.toLowerCase()) ||
+          sessionsOfTask(t.id, sessions, assignments).some((s) => matchesQuery(s, query)),
+      )
+    : tasks;
+  const orphans = orphanSessions(sessions, tasks, assignments)
+    .filter((s) => !(hideIdle && s.state === "Idle"))
+    .filter((s) => matchesQuery(s, query));
+
+  // The tray is hidden when empty — except mid-drag of a session, so there's
+  // always somewhere to drop it to unassign.
+  const showTray = orphans.length > 0 || drag.kind === "session";
+  const noResults = hasQuery && visibleTasks.length === 0 && orphans.length === 0;
 
   return (
-    <div className={styles.board}>
-      {(groups.length > 0 || !hasQuery) && (
-        <div className={styles.lanes}>
-          {groups.map((g) => (
-            <Swimlane key={g.name} name={g.name} sessions={g.sessions} nowMs={nowMs} onSelect={selectCard} />
-          ))}
-          {!hasQuery && <AddCategoryRow />}
-        </div>
-      )}
+    <div className={styles.board} ref={rootRef}>
+      {showTray && <UnassignedTray sessions={orphans} />}
       {noResults && (
-        <div className={styles.empty}>
-          <div className={styles.emptyMessage}>No live sessions match &ldquo;{query}&rdquo;.</div>
-          <button className={styles.emptyButton} onClick={() => openAskWithQuery(query)}>
+        <div className={styles.noResults}>
+          <div>No tasks or sessions match &ldquo;{query}&rdquo;.</div>
+          <button className={styles.noResultsButton} onClick={() => openAskWithQuery(query)}>
             ✦ Search your full history instead
           </button>
         </div>
       )}
-    </div>
-  );
-}
-
-// Phase 2 §5: the dashed "+ New category" control below the last lane.
-// Inline input, Enter commits, Esc cancels — a brand-new category has no
-// session to seed from, so `MemoryRepo::create_category` embeds the name
-// itself as a placeholder exemplar.
-function AddCategoryRow() {
-  const addCategory = useSessionStore((s) => s.addCategory);
-  const [adding, setAdding] = useState(false);
-  const [name, setName] = useState("");
-
-  const cancel = () => {
-    setAdding(false);
-    setName("");
-  };
-
-  const commit = () => {
-    const trimmed = name.trim();
-    if (!trimmed) {
-      cancel();
-      return;
-    }
-    createCategory(trimmed)
-      .then(() => addCategory(trimmed))
-      .catch((err) => console.error("Failed to create category:", err));
-    cancel();
-  };
-
-  if (adding) {
-    return (
-      <div className={styles.addCategoryRow}>
-        <div className={styles.addCategorySpacer} />
-        <div className={styles.addCategoryInputWrap}>
-          <span className={styles.addCategoryPlus}>+</span>
-          <input
-            autoFocus
-            className={styles.addCategoryInput}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commit();
-              else if (e.key === "Escape") cancel();
-            }}
-            placeholder="Category name…"
+      <div className={styles.columns}>
+        {STAGES.map((st) => (
+          <Column
+            key={st.key}
+            stage={st.key}
+            label={st.label}
+            accent={st.accent}
+            tasks={visibleTasks.filter((t) => t.stage === st.key)}
+            sessions={sessions}
+            assignments={assignments}
           />
-          <button className={styles.addCategoryCommit} onClick={commit}>
-            Add
-          </button>
-          <button className={styles.addCategoryCancel} onClick={cancel}>
-            Esc
-          </button>
-        </div>
+        ))}
       </div>
-    );
-  }
-
-  return (
-    <div className={styles.addCategoryRow}>
-      <div className={styles.addCategorySpacer} />
-      <button className={styles.addCategoryButton} onClick={() => setAdding(true)}>
-        <span className={styles.addCategoryButtonPlus}>+</span> New category
-      </button>
     </div>
   );
 }

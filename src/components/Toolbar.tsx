@@ -18,7 +18,11 @@ export function Toolbar() {
 
   const workingCount = sessions.filter((s) => s.state === "Working").length;
   const waitingCount = sessions.filter((s) => s.state === "Waiting").length;
-  const idleCount = sessions.filter((s) => s.state === "Idle").length;
+  // Only orphan idle sessions are hidden (see Board), so only those are counted.
+  const assignments = useSessionStore(useShallow((s) => s.assignments));
+  const tasks = useSessionStore(useShallow((s) => s.tasks));
+  const known = new Set(tasks.map((t) => t.id));
+  const idleCount = sessions.filter((s) => s.state === "Idle" && !(assignments[s.id] && known.has(assignments[s.id]))).length;
 
   return (
     <div className={styles.toolbar}>

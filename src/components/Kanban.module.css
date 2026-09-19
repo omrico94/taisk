@@ -1,0 +1,317 @@
+/* Kanban board (design view 1a). Values are the handoff's, verbatim. */
+
+.spacer { flex: 1; }
+
+.board {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.columns {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 14px;
+  padding: 18px 18px 24px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  align-items: stretch;
+}
+
+/* ---------- Session state dot ---------- */
+.stateDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.stateDotWorking { animation: breathe var(--duration-ambient) ease-in-out infinite; }
+
+/* ---------- Column ---------- */
+.column {
+  flex: 1 1 0;
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.columnHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 10px;
+  margin-bottom: 12px;
+  flex: 0 0 auto;
+}
+.columnDot { width: 8px; height: 8px; border-radius: 50%; }
+.columnLabel {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.columnCount { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); }
+.wipBadge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+}
+.wipOver { background: rgba(248, 113, 113, 0.16); color: var(--state-danger); }
+
+.columnBody {
+  flex: 1;
+  min-height: 60px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-radius: 14px;
+  padding: 2px;
+  margin: -2px;
+  transition: background 0.15s;
+}
+.columnHot {
+  background: rgba(56, 189, 248, 0.08);
+  box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.55);
+}
+
+.columnFooter { flex: 0 0 auto; padding-top: 12px; }
+.addButton {
+  width: 100%;
+  padding: 9px;
+  border-radius: 12px;
+  background: transparent;
+  border: 1.5px dashed rgba(255, 255, 255, 0.14);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.addButton:hover { border-color: rgba(56, 189, 248, 0.5); color: var(--accent-cyan-light); }
+.addRow { display: flex; gap: 6px; }
+.addInput {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-family: inherit;
+  outline: none;
+}
+.addCommit, .addCancel {
+  padding: 0 10px;
+  border-radius: 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.addCommit { background: rgba(56, 189, 248, 0.16); border: 1px solid rgba(56, 189, 248, 0.35); color: var(--accent-cyan-light); }
+.addCancel { background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border-10); color: var(--text-muted); }
+
+/* ---------- Task card ---------- */
+.taskCard {
+  padding: 13px 14px;
+  border-radius: var(--radius-card);
+  background: var(--surface-card);
+  border: 1px solid var(--border-09);
+  backdrop-filter: blur(14px);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  flex: 0 0 auto;
+  transition: opacity 0.15s, box-shadow 0.3s;
+}
+.taskNeeds {
+  --w: rgba(251, 191, 36, 0.5);
+  border-color: rgba(251, 191, 36, 0.55);
+  animation: waitGlow 2.8s ease-in-out infinite;
+}
+.taskWorking { box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.14), 0 8px 30px -14px rgba(56, 189, 248, 0.4); }
+.taskDone { opacity: 0.72; }
+.taskDropTarget { outline: 1.5px dashed rgba(56, 189, 248, 0.8); outline-offset: 2px; }
+
+.taskTopRow { display: flex; align-items: center; gap: 8px; }
+.toolBadge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.taskProject { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+.needsPill {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: rgba(251, 191, 36, 0.14);
+  color: var(--state-waiting);
+}
+.taskTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+.rollRow { display: flex; align-items: center; gap: 9px; }
+.rollTrack { flex: 1; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.rollFill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
+.rollLabel { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); white-space: nowrap; }
+
+/* Collapsible list: grid-rows trick so max-height transitions without a fixed height. */
+.sessionList { display: grid; grid-template-rows: 1fr; transition: grid-template-rows 0.28s var(--ease-standard); }
+.sessionListCollapsed { grid-template-rows: 0fr; }
+.sessionListInner { overflow: hidden; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+
+.taskFooter { display: flex; align-items: center; gap: 8px; }
+.footerLabel { font-size: 11px; color: var(--text-muted); }
+.footerTokens { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary-alt); }
+.footerCost { font-family: var(--font-mono); font-size: 11px; color: var(--accent-cyan-light); }
+.noSessions { font-size: 11.5px; font-style: italic; color: var(--text-faint); }
+
+/* ---------- Session row ---------- */
+.sessionRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--border-06);
+  cursor: grab;
+}
+.sessionRow:hover { background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.14); }
+.sessionTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #dfe3ec;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subCount { font-family: var(--font-mono); font-size: 10px; color: var(--accent-cyan-light); }
+.tokenCount { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted-alt); }
+.iconButton {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1;
+  border-radius: 5px;
+  cursor: pointer;
+  padding: 0;
+}
+.iconUnassign:hover { color: var(--state-working); }
+.iconDelete:hover { color: var(--state-danger); }
+
+/* ---------- Unassigned tray ---------- */
+.tray {
+  flex: 0 0 auto;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border-06);
+  transition: background 0.15s;
+}
+.trayHot { background: rgba(56, 189, 248, 0.07); box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.55); }
+.trayHeader { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.trayLabel { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
+.trayCount { font-family: var(--font-mono); font-size: 11px; color: #5f6678; }
+.trayHint { font-size: 10.5px; color: #5f6678; }
+.trayBody { display: flex; flex-wrap: wrap; gap: 9px; min-height: 8px; }
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 11px;
+  background: var(--surface-card);
+  border: 1px solid var(--border-09);
+  cursor: grab;
+}
+.chip:hover { border-color: rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); }
+.chipTitle { font-size: 12px; font-weight: 500; color: #dfe3ec; white-space: nowrap; cursor: pointer; }
+.assignButton {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.assignButton:hover { background: rgba(255, 255, 255, 0.12); }
+
+/* ---------- Assign menu ---------- */
+.assignMenu {
+  position: fixed;
+  z-index: 70;
+  max-height: 220px;
+  overflow-y: auto;
+  border-radius: 10px;
+  background: #14181f;
+  border: 1px solid var(--border-12);
+  box-shadow: 0 20px 50px -20px rgba(0, 0, 0, 0.8);
+  padding: 6px;
+}
+.assignHeader { font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #5f6678; padding: 4px 8px 6px; }
+.assignEmpty { font-size: 11.5px; color: var(--text-faint); padding: 6px 8px; }
+.assignItem {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+}
+.assignItem:hover { background: rgba(255, 255, 255, 0.08); }
+.assignTitle { font-size: 12px; color: #dfe3ec; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assignProject { font-family: var(--font-mono); font-size: 10px; color: var(--text-faint); }
+
+/* ---------- Empty search ---------- */
+.noResults {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.noResultsButton {
+  padding: 8px 14px;
+  border-radius: var(--radius-pill);
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: var(--accent-cyan-light);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}

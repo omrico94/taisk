@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useSessionStore } from "./sessionStore";
-import { getCategories, getSessions, WS_URL } from "../api";
-import type { SessionDiff } from "../types";
+import { getSessions, getTasks, WS_URL } from "../api";
+import type { BoardMessage } from "../types";
 
 // M10: the real data source, replacing useMockSessionEngine (M8). Seeds the
 // store from GET /sessions on mount, then applies live WS diffs — same
@@ -10,7 +10,7 @@ export function useSessionEngine(): void {
   const setSessions = useSessionStore((s) => s.setSessions);
   const upsertSession = useSessionStore((s) => s.upsertSession);
   const removeSession = useSessionStore((s) => s.removeSession);
-  const setCategories = useSessionStore((s) => s.setCategories);
+  const setTasksSnapshot = useSessionStore((s) => s.setTasksSnapshot);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,11 +32,11 @@ export function useSessionEngine(): void {
         })
         .catch((err) => console.error("Failed to load sessions from Core Engine:", err));
 
-      getCategories()
-        .then((categories) => {
-          if (!cancelled) setCategories(categories);
+      getTasks()
+        .then((snap) => {
+          if (!cancelled) setTasksSnapshot(snap);
         })
-        .catch((err) => console.error("Failed to load categories from Core Engine:", err));
+        .catch((err) => console.error("Failed to load tasks from Core Engine:", err));
     };
 
     const connect = () => {
@@ -48,11 +48,13 @@ export function useSessionEngine(): void {
         retryDelayMs = 1000; // reset backoff once a connection actually succeeds
       };
       ws.onmessage = (event) => {
-        const diff = JSON.parse(event.data) as SessionDiff;
-        if ("Upserted" in diff) {
-          upsertSession(diff.Upserted);
+        const msg = JSON.parse(event.data) as BoardMessage;
+        if ("Upserted" in msg) {
+          upsertSession(msg.Upserted);
+        } else if ("Removed" in msg) {
+          removeSession(msg.Removed);
         } else {
-          removeSession(diff.Removed);
+          setTasksSnapshot(msg.TasksChanged);
         }
       };
       ws.onerror = (err) => console.error("Core Engine WS error:", err);
@@ -70,5 +72,5 @@ export function useSessionEngine(): void {
       clearTimeout(reconnectTimer);
       ws?.close();
     };
-  }, [setSessions, upsertSession, removeSession, setCategories]);
+  }, [setSessions, upsertSession, removeSession, setTasksSnapshot]);
 }

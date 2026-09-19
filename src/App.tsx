@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Toolbar } from "./components/Toolbar";
 import { Board } from "./components/Board";
-import { DetailDrawer } from "./components/DetailDrawer";
+import { SessionOverlay } from "./components/SessionOverlay";
+import { AssignMenu } from "./components/AssignMenu";
 import { AskMemoryOverlay } from "./components/AskMemoryOverlay";
 import { useSessionStore } from "./store/sessionStore";
 import { useSessionEngine } from "./store/useSessionEngine";
@@ -29,6 +30,7 @@ function App() {
       } else if (key === "escape") {
         setAskOpen(false);
         selectCard(null);
+        useSessionStore.getState().openAssignMenu(null);
       }
     };
     document.addEventListener("keydown", onKeyDown);
@@ -39,8 +41,9 @@ function App() {
     <div className={styles.app}>
       <Toolbar />
       <div className={styles.body}>
-        <Board nowMs={nowMs} />
-        <DetailDrawer nowMs={nowMs} />
+        <Board />
+        <SessionOverlay nowMs={nowMs} />
+        <AssignMenu />
         <AskMemoryOverlay />
       </div>
     </div>
