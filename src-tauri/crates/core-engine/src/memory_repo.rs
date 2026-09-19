@@ -2,11 +2,10 @@
 //! plan §2/§6). Keeps LanceDB's Arrow-based schema/query details out of the
 //! rest of the engine behind a handful of narrow, purpose-built methods.
 //!
-//! Two tables, both created on first use (no migrations):
-//! - `memories`: durable prompt/summary embeddings, backing both categorization
-//!   lookups and historical semantic search (FR5+FR6).
-//! - `category_exemplars`: one row per known category, used for the
-//!   nearest-category similarity check during categorization (FR4).
+//! One table, created on first use (no migrations): `memories` — durable
+//! prompt/summary embeddings backing session reconstruction and historical
+//! semantic search (FR5+FR6). (A legacy `category_exemplars` table from the
+//! pre-Kanban swimlane board may still exist on disk; it is simply ignored.)
 
 use std::sync::Arc;
 
@@ -31,7 +30,6 @@ use lancedb::{Connection, DistanceType};
 pub const EMBEDDING_DIM: i32 = 768;
 
 const MEMORIES_TABLE: &str = "memories";
-const EXEMPLARS_TABLE: &str = "category_exemplars";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryKind {
@@ -69,8 +67,7 @@ pub struct Memory {
     /// `orchestrator::reconstruct_live_sessions`).
     pub cwd: String,
     pub tool: String,
-    pub category: String,
-    /// The session's LLM-generated title (from `categorize_session`), stored
+    /// The session's LLM-generated title (from `summarize_session`), stored
     /// durably so `orchestrator::reconstruct_live_sessions` can restore the
     /// real title on restart instead of falling back to a crude truncation
     /// of `text` — see that function's doc comment for the bug this fixed.
@@ -83,13 +80,6 @@ pub struct ScoredMemory {
     pub memory: Memory,
     /// Cosine distance (lower = more similar). Range [0, 2].
     pub distance: f32,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Exemplar {
-    pub category: String,
-    pub exemplar_embedding: Vec<f32>,
-    pub created_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -123,16 +113,11 @@ fn memories_schema() -> SchemaRef {
         Field::new("project", DataType::Utf8, false),
         Field::new("cwd", DataType::Utf8, false),
         Field::new("tool", DataType::Utf8, false),
+        // Legacy column from the swimlane-board era: kept in the schema (and
+        // written as "") so existing on-disk history isn't wiped by the
+        // stale-schema recreate; never read.
         Field::new("category", DataType::Utf8, false),
         Field::new("title", DataType::Utf8, false),
-        Field::new("created_at", DataType::Int64, false),
-    ]))
-}
-
-fn exemplars_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new("category", DataType::Utf8, false),
-        vector_field("exemplar_embedding"),
         Field::new("created_at", DataType::Int64, false),
     ]))
 }
@@ -159,32 +144,12 @@ fn memory_to_batch(m: &Memory) -> RecordBatch {
             Arc::new(StringArray::from(vec![m.project.clone()])),
             Arc::new(StringArray::from(vec![m.cwd.clone()])),
             Arc::new(StringArray::from(vec![m.tool.clone()])),
-            Arc::new(StringArray::from(vec![m.category.clone()])),
+            Arc::new(StringArray::from(vec![String::new()])), // legacy `category` column
             Arc::new(StringArray::from(vec![m.title.clone()])),
             Arc::new(Int64Array::from(vec![m.created_at])),
         ],
     )
     .expect("memory RecordBatch construction is schema-consistent by definition")
-}
-
-fn exemplar_to_batch(e: &Exemplar) -> RecordBatch {
-    let schema = exemplars_schema();
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(StringArray::from(vec![e.category.clone()])),
-            Arc::new(
-                FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                    vec![Some(
-                        e.exemplar_embedding.iter().map(|v| Some(*v)).collect::<Vec<_>>(),
-                    )],
-                    EMBEDDING_DIM,
-                ),
-            ),
-            Arc::new(Int64Array::from(vec![e.created_at])),
-        ],
-    )
-    .expect("exemplar RecordBatch construction is schema-consistent by definition")
 }
 
 fn extract_string_col(batch: &RecordBatch, name: &str) -> Vec<String> {
@@ -252,7 +217,6 @@ fn rows_to_memories(batch: &RecordBatch) -> Vec<Memory> {
     let projects = extract_string_col(batch, "project");
     let cwds = extract_string_col(batch, "cwd");
     let tools = extract_string_col(batch, "tool");
-    let categories = extract_string_col(batch, "category");
     let titles = extract_string_col(batch, "title");
     let created_ats = extract_i64_col(batch, "created_at");
 
@@ -266,7 +230,6 @@ fn rows_to_memories(batch: &RecordBatch) -> Vec<Memory> {
             project: projects[i].clone(),
             cwd: cwds[i].clone(),
             tool: tools[i].clone(),
-            category: categories[i].clone(),
             title: titles[i].clone(),
             created_at: created_ats[i],
         })
@@ -312,16 +275,10 @@ impl MemoryRepo {
         let existing = db.table_names().execute().await?;
 
         recreate_if_schema_stale(&db, MEMORIES_TABLE, &existing, memories_schema()).await?;
-        recreate_if_schema_stale(&db, EXEMPLARS_TABLE, &existing, exemplars_schema()).await?;
 
         let existing = db.table_names().execute().await?;
         if !existing.iter().any(|t| t == MEMORIES_TABLE) {
             db.create_table(MEMORIES_TABLE, empty_batch(memories_schema()))
-                .execute()
-                .await?;
-        }
-        if !existing.iter().any(|t| t == EXEMPLARS_TABLE) {
-            db.create_table(EXEMPLARS_TABLE, empty_batch(exemplars_schema()))
                 .execute()
                 .await?;
         }
@@ -342,81 +299,6 @@ impl MemoryRepo {
         builder.when_not_matched_insert_all();
         builder.execute(Box::new(reader)).await?;
         Ok(())
-    }
-
-    /// Insert-or-replace a category's exemplar embedding, keyed on `category`.
-    pub async fn upsert_exemplar(&self, e: &Exemplar) -> lancedb::Result<()> {
-        let table = self.db.open_table(EXEMPLARS_TABLE).execute().await?;
-        let batch = exemplar_to_batch(e);
-        let schema = batch.schema();
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        let mut builder = table.merge_insert(&["category"]);
-        builder.when_matched_update_all(None);
-        builder.when_not_matched_insert_all();
-        builder.execute(Box::new(reader)).await?;
-        Ok(())
-    }
-
-    /// Creates a new, empty category (Phase 2 §5 — user-created categories
-    /// via the board's "+ New category" control). There's no session prompt
-    /// to seed the exemplar from yet, so the category name's own embedding
-    /// is used as the placeholder — the same `upsert_exemplar` mechanism
-    /// every other category's exemplar goes through, just seeded
-    /// differently. A later real session dropped into this lane recategorizes
-    /// exactly like any other manual override; the exemplar isn't refined
-    /// further here.
-    pub async fn create_category(&self, name: &str, embedding: Vec<f32>, created_at: i64) -> lancedb::Result<()> {
-        self.upsert_exemplar(&Exemplar { category: name.to_string(), exemplar_embedding: embedding, created_at }).await
-    }
-
-    /// Nearest category exemplar to `embedding` by cosine distance, if any
-    /// exemplars exist yet. The caller (categorization pipeline, plan §5)
-    /// applies the configurable similarity threshold to this result.
-    pub async fn nearest_category(
-        &self,
-        embedding: &[f32],
-    ) -> lancedb::Result<Option<(String, f32)>> {
-        let table = self.db.open_table(EXEMPLARS_TABLE).execute().await?;
-        let batches: Vec<RecordBatch> = table
-            .query()
-            .nearest_to(embedding)?
-            .column("exemplar_embedding")
-            .distance_type(DistanceType::Cosine)
-            .limit(1)
-            .execute()
-            .await?
-            .try_collect()
-            .await?;
-
-        for batch in &batches {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-            let categories = extract_string_col(batch, "category");
-            let distances = extract_f32_col(batch, "_distance");
-            return Ok(Some((categories[0].clone(), distances[0])));
-        }
-        Ok(None)
-    }
-
-    /// All known category exemplars (small table — one row per category).
-    pub async fn list_exemplars(&self) -> lancedb::Result<Vec<Exemplar>> {
-        let table = self.db.open_table(EXEMPLARS_TABLE).execute().await?;
-        let batches: Vec<RecordBatch> = table.query().execute().await?.try_collect().await?;
-        let mut out = Vec::new();
-        for batch in &batches {
-            let categories = extract_string_col(batch, "category");
-            let embeddings = extract_vector_col(batch, "exemplar_embedding");
-            let created_ats = extract_i64_col(batch, "created_at");
-            for i in 0..batch.num_rows() {
-                out.push(Exemplar {
-                    category: categories[i].clone(),
-                    exemplar_embedding: embeddings[i].clone(),
-                    created_at: created_ats[i],
-                });
-            }
-        }
-        Ok(out)
     }
 
     /// Semantic search over `memories` (live + historical) ranked by cosine
@@ -451,9 +333,9 @@ impl MemoryRepo {
     }
 
     /// Every durable memory row (one per session, in practice — see
-    /// `categorize_session`, which always upserts a single `{session_id}-prompt`
+    /// `summarize_session`, which always upserts a single `{session_id}-prompt`
     /// row per session). Used on Core Engine restart to reconstruct which
-    /// sessions were previously seen and what category they resolved to
+    /// sessions were previously seen and what title they resolved to
     /// (`orchestrator::reconstruct_live_sessions`), and could back a future
     /// "browse full history" view.
     pub async fn list_session_memories(&self) -> lancedb::Result<Vec<Memory>> {
@@ -471,20 +353,6 @@ impl MemoryRepo {
             PurgeScope::All => "true".to_string(),
             PurgeScope::Project(project) => format!("project = '{}'", project.replace('\'', "''")),
         };
-        table.delete(&predicate).await?;
-        Ok(())
-    }
-
-    /// Removes a category's exemplar row (the board's "Delete category"
-    /// action) so it stops appearing as a known lane. Deliberately doesn't
-    /// touch `memories` — the historical prompt/summary rows that were once
-    /// tagged with this category stay searchable via Ask Memory; only the
-    /// live cascade (removing each currently-live session in the category)
-    /// is the caller's job (`api::delete_category`), same separation as
-    /// single-session delete leaving `memories` alone.
-    pub async fn delete_exemplar(&self, category: &str) -> lancedb::Result<()> {
-        let table = self.db.open_table(EXEMPLARS_TABLE).execute().await?;
-        let predicate = format!("category = '{}'", category.replace('\'', "''"));
         table.delete(&predicate).await?;
         Ok(())
     }
@@ -535,7 +403,6 @@ mod tests {
             project: "api-gateway".into(),
             cwd: "/Users/omricohen/api-gateway".into(),
             tool: "Claude Code".into(),
-            category: "Backend / API".into(),
             title: "Refactor auth middleware".into(),
             created_at: 0,
         };
@@ -560,7 +427,6 @@ mod tests {
             project: "api-gateway".into(),
             cwd: "/Users/omricohen/api-gateway".into(),
             tool: "Claude Code".into(),
-            category: "Backend / API".into(),
             title: "Refactor auth middleware".into(),
             created_at: 1_700_000_000_000,
         };
@@ -581,105 +447,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nearest_category_threshold_boundary() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = MemoryRepo::open(dir.path().to_str().unwrap()).await.unwrap();
-
-        // No exemplars yet -> no match.
-        assert_eq!(repo.nearest_category(&vec_of(EMBEDDING_DIM, 1.0)).await.unwrap(), None);
-
-        repo.upsert_exemplar(&Exemplar {
-            category: "Backend / API".into(),
-            exemplar_embedding: vec_of(EMBEDDING_DIM, 1.0),
-            created_at: 0,
-        })
-        .await
-        .unwrap();
-        repo.upsert_exemplar(&Exemplar {
-            category: "Frontend".into(),
-            exemplar_embedding: vec_of(EMBEDDING_DIM, -1.0),
-            created_at: 0,
-        })
-        .await
-        .unwrap();
-
-        // Identical vector to the "Backend / API" exemplar -> distance ~0 (clearly above any sane threshold).
-        let (cat, dist) = repo
-            .nearest_category(&vec_of(EMBEDDING_DIM, 1.0))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(cat, "Backend / API");
-        assert!(dist < 0.01);
-
-        // Opposite-direction vector -> should match "Frontend" (nearest), with
-        // a large cosine distance (near the max of 2.0) — this is the "clearly
-        // below threshold, should NOT join" case the categorization pipeline
-        // checks (plan §5 step 4).
-        let (cat, dist) = repo
-            .nearest_category(&vec_of(EMBEDDING_DIM, -1.0))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(cat, "Frontend");
-        assert!(dist < 0.01);
-    }
-
-    #[tokio::test]
-    async fn create_category_seeds_an_exemplar_findable_via_list_and_nearest() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = MemoryRepo::open(dir.path().to_str().unwrap()).await.unwrap();
-
-        repo.create_category("Ops / Infra", vec_of(EMBEDDING_DIM, 1.0), 42).await.unwrap();
-
-        let exemplars = repo.list_exemplars().await.unwrap();
-        assert_eq!(exemplars.len(), 1);
-        assert_eq!(exemplars[0].category, "Ops / Infra");
-        assert_eq!(exemplars[0].created_at, 42);
-
-        // A brand-new empty category must be reachable the same way any
-        // other category's exemplar is — a manual recategorize into it is
-        // just `POST /sessions/:id/recategorize`, but the lane itself has to
-        // exist first via this seeded exemplar.
-        let (cat, _) = repo.nearest_category(&vec_of(EMBEDDING_DIM, 1.0)).await.unwrap().unwrap();
-        assert_eq!(cat, "Ops / Infra");
-    }
-
-    #[tokio::test]
-    async fn delete_exemplar_removes_only_the_named_category_and_leaves_memories_alone() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = MemoryRepo::open(dir.path().to_str().unwrap()).await.unwrap();
-
-        repo.create_category("Ops / Infra", vec_of(EMBEDDING_DIM, 1.0), 42).await.unwrap();
-        repo.create_category("Backend / API", vec_of(EMBEDDING_DIM, -1.0), 43).await.unwrap();
-        repo.upsert_memory(&Memory {
-            id: "a".into(),
-            session_id: "a".into(),
-            kind: MemoryKind::Prompt,
-            text: "x".into(),
-            embedding: vec_of(EMBEDDING_DIM, 1.0),
-            project: "proj-1".into(),
-            cwd: "/Users/omricohen/proj-1".into(),
-            tool: "Claude Code".into(),
-            category: "Ops / Infra".into(),
-            title: "x".into(),
-            created_at: 0,
-        })
-        .await
-        .unwrap();
-
-        repo.delete_exemplar("Ops / Infra").await.unwrap();
-
-        let exemplars = repo.list_exemplars().await.unwrap();
-        assert_eq!(exemplars.len(), 1, "only the named category's exemplar should be removed");
-        assert_eq!(exemplars[0].category, "Backend / API");
-
-        let memories = repo.list_session_memories().await.unwrap();
-        assert_eq!(memories.len(), 1, "historical memory rows must survive a category delete");
-        assert_eq!(memories[0].category, "Ops / Infra");
-    }
-
-    #[tokio::test]
     async fn purge_by_project_and_all() {
         let dir = tempfile::tempdir().unwrap();
         let repo = MemoryRepo::open(dir.path().to_str().unwrap()).await.unwrap();
@@ -694,7 +461,6 @@ mod tests {
                 project: project.into(),
                 cwd: format!("/Users/omricohen/{project}"),
                 tool: "Claude Code".into(),
-                category: "Backend / API".into(),
                 title: "x".into(),
                 created_at: 0,
             })

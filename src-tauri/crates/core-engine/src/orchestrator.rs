@@ -1,7 +1,7 @@
 //! Wires the pieces built in M2–M7 into one running system: listens on the
 //! hook UDS (`hook_socket`), maps each `HookEvent` to the state machine
 //! (`state`/`engine`) and, on `session-start`, tails the transcript
-//! (`collector`) and runs the categorization pipeline (`categorize`).
+//! (`collector`) and runs the summary pipeline (`summarize`).
 //!
 //! This module didn't exist before M10 — the earlier milestones built and
 //! tested each piece (the collector's tailing logic, the categorization
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, Mutex};
 
-use crate::categorize::{categorize_session, refresh_task_summary, CategorizationConfig};
+use crate::summarize::{refresh_task_summary, summarize_session, SummarizeConfig};
 use crate::collector::{
     extract_entrypoint, extract_initiating_prompt, extract_latest_activity, extract_usage_metrics, list_subagents,
     project_name_from_cwd, read_lines_from_start, tail_new_lines, transcript_path, TailCheckpoints,
@@ -431,7 +431,6 @@ async fn reconstruct_live_sessions(
                     .await;
             }
         }
-        engine.dispatch(EngineCommand::SetCategory { id: memory.session_id.clone(), category: memory.category.clone() }).await;
         // The real LLM-generated title is now stored durably on the memory
         // row (`Memory::title`) — restore it directly. Only rows written
         // before that field existed have it empty (self-healing schema drops
@@ -469,7 +468,7 @@ async fn reconstruct_live_sessions(
         // underlying data on disk had changed.
         let subs = list_subagents(&orch_config.claude_projects_dir, &memory.cwd, &memory.session_id);
         engine.dispatch(EngineCommand::SetSubagents { id: memory.session_id.clone(), subs }).await;
-        let plan = read_session_plan(&orch_config.tasks_dir, &memory.session_id, &memory.category);
+        let plan = read_session_plan(&orch_config.tasks_dir, &memory.session_id, &memory.title);
         engine.dispatch(EngineCommand::SetPlan { id: memory.session_id, plan }).await;
     }
 }
@@ -525,7 +524,7 @@ pub async fn run(
     engine: EngineHandle,
     repo: Arc<MemoryRepo>,
     ollama: Arc<dyn OllamaClient>,
-    cat_config: Arc<CategorizationConfig>,
+    cat_config: Arc<SummarizeConfig>,
     orch_config: Arc<OrchestratorConfig>,
     waiting_sessions: Arc<Mutex<WaitingSessions>>,
     dismissed_sessions: Arc<Mutex<DismissedSessions>>,
@@ -587,7 +586,7 @@ async fn handle_hook_event(
     engine: &EngineHandle,
     repo: &MemoryRepo,
     ollama: &dyn OllamaClient,
-    cat_config: &CategorizationConfig,
+    cat_config: &SummarizeConfig,
     orch_config: &OrchestratorConfig,
     checkpoints: &Arc<Mutex<TailCheckpoints>>,
     ended_sessions: &Arc<Mutex<EndedSessions>>,
@@ -742,7 +741,7 @@ async fn handle_hook_event(
                 })
                 .await;
 
-            let _ = categorize_session(engine, repo, ollama, cat_config, &session_id, &project, &cwd, "Claude Code", &prompt).await;
+            let _ = summarize_session(engine, repo, ollama, cat_config, &session_id, &project, &cwd, "Claude Code", &prompt).await;
         }
         // `idle_prompt` is deliberately excluded (see the `is_idle_prompt`
         // computation above) — it means "sitting idle," not "blocked on
@@ -877,14 +876,14 @@ async fn handle_hook_event(
             // Independent of the transcript file itself — reads
             // `~/.claude/tasks/<session_id>/` directly. `None` (no
             // `TaskCreate` ever used) is the normal case, not an error.
-            let category = engine
+            let session_title = engine
                 .snapshot()
                 .await
                 .into_iter()
                 .find(|v| v.id == session_id)
-                .map(|v| v.category)
-                .unwrap_or_else(|| "General".to_string());
-            let plan = read_session_plan(&orch_config.tasks_dir, &session_id, &category);
+                .map(|v| v.title)
+                .unwrap_or_else(|| "Session".to_string());
+            let plan = read_session_plan(&orch_config.tasks_dir, &session_id, &session_title);
             engine.dispatch(EngineCommand::SetPlan { id: session_id.clone(), plan }).await;
         }
         "session-end" => {
@@ -989,7 +988,6 @@ mod tests {
             project: "api-gateway".to_string(),
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
-            category: "Backend / API".to_string(),
             title: String::new(),
             created_at: 1_700_000_000_000,
         })
@@ -1013,7 +1011,6 @@ mod tests {
         let snapshot = engine.snapshot().await;
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].id, session_id);
-        assert_eq!(snapshot[0].category, "Backend / API");
         assert_eq!(snapshot[0].project, "api-gateway");
         assert_eq!(snapshot[0].state, crate::state::SessionState::Working);
         assert_eq!(snapshot[0].desc, "Refactor auth middleware to async/await");
@@ -1024,7 +1021,7 @@ mod tests {
     /// Regression (user report — a session's real title was silently
     /// replaced by a crude 4-word prompt chop on every Core Engine restart,
     /// including routine dev-mode rebuilds): the LLM-generated title from
-    /// `categorize_session` must now be restored verbatim from the durable
+    /// `summarize_session` must now be restored verbatim from the durable
     /// `memories` row, not recomputed from `text` — recomputing is only the
     /// fallback for rows with no stored title (see the test above).
     #[tokio::test]
@@ -1048,7 +1045,6 @@ mod tests {
             project: "api-gateway".to_string(),
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
-            category: "Backend / API".to_string(),
             title: "Auth middleware refactor".to_string(),
             created_at: 1_700_000_000_000,
         })
@@ -1125,7 +1121,6 @@ mod tests {
             project: "api-gateway".to_string(),
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
-            category: "Backend / API".to_string(),
             title: String::new(),
             created_at: 1_700_000_000_000,
         })
@@ -1193,7 +1188,6 @@ mod tests {
             project: "api-gateway".to_string(),
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
-            category: "Backend / API".to_string(),
             title: String::new(),
             created_at: 1_700_000_000_000,
         })
@@ -1257,7 +1251,6 @@ mod tests {
                 project: "api-gateway".to_string(),
                 cwd: cwd.to_string(),
                 tool: "Claude Code".to_string(),
-                category: "Backend / API".to_string(),
                 title: String::new(),
                 created_at: 1_700_000_000_000,
             })
@@ -1323,7 +1316,6 @@ mod tests {
             project: "api-gateway".to_string(),
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
-            category: "Backend / API".to_string(),
             title: String::new(),
             created_at: 1_700_000_000_000,
         })
@@ -1377,7 +1369,6 @@ mod tests {
             project: "api-gateway".to_string(),
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
-            category: "Backend / API".to_string(),
             title: String::new(),
             created_at: 1_700_000_000_000,
         })
@@ -1430,7 +1421,6 @@ mod tests {
             project: "api-gateway".to_string(),
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
-            category: "Backend / API".to_string(),
             title: String::new(),
             created_at: 1_700_000_000_000,
         })
@@ -1469,8 +1459,8 @@ mod tests {
 
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
         let engine = EngineHandle::spawn();
-        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
-        let cat_config = CategorizationConfig::default();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
         let orch_config = OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
             checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
@@ -1522,7 +1512,6 @@ mod tests {
             project: "old-project".to_string(),
             cwd: cwd.to_string(),
             tool: "Claude Code".to_string(),
-            category: "Backend / API".to_string(),
             title: String::new(),
             created_at: 0,
         })
@@ -1573,8 +1562,8 @@ mod tests {
         let mut diffs = engine.subscribe();
         let repo = Arc::new(MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap());
         let ollama: Arc<dyn OllamaClient> =
-            Arc::new(FakeOllamaClient::new_categorizing("Backend / API", 90, true, "Refactoring auth middleware"));
-        let cat_config = Arc::new(CategorizationConfig::default());
+            Arc::new(FakeOllamaClient::new_summarizing("Refactoring auth middleware"));
+        let cat_config = Arc::new(SummarizeConfig::default());
         // Isolated per-test socket path — parallel test runs must not share
         // the real default UDS path, or they collide with each other (and
         // with a real running instance) binding the same file.
@@ -1616,7 +1605,7 @@ mod tests {
             .unwrap();
         let SessionDiff::Upserted(initial) = diff else { panic!("expected Upserted") };
         assert_eq!(initial.id, session_id);
-        assert_eq!(initial.category, "Uncategorized");
+        assert_eq!(initial.title, "Starting…");
         assert_eq!(initial.project, "api-gateway");
 
         // Categorization resolves via the real pipeline, followed by
@@ -1624,11 +1613,11 @@ mod tests {
         // intermediate diffs rather than assuming an exact count, since
         // that's an implementation detail of the pipeline, not the contract
         // under test here.
-        let categorized = recv_until(&mut diffs, |v| v.category != "Uncategorized")
+        let summarized = recv_until(&mut diffs, |v| v.desc != "Starting…")
             .await
-            .expect("should receive a categorized diff before timing out");
-        assert_eq!(categorized.id, session_id);
-        assert_eq!(categorized.category, "Backend / API");
+            .expect("should receive a summarized diff before timing out");
+        assert_eq!(summarized.id, session_id);
+        assert_eq!(summarized.desc, "Refactoring auth middleware");
 
         // Now drive a Notification hook event through the same real path.
         let envelope = serde_json::json!({"event": "notification", "payload": real_notification_payload(session_id, "permission_prompt")});
@@ -1671,8 +1660,8 @@ mod tests {
             .await;
 
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
-        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
-        let cat_config = CategorizationConfig::default();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
         let orch_config = OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
             checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
@@ -1735,8 +1724,8 @@ mod tests {
             .await;
 
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
-        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
-        let cat_config = CategorizationConfig::default();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
         let orch_config = OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
             checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
@@ -1822,8 +1811,8 @@ mod tests {
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Done);
 
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
-        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
-        let cat_config = CategorizationConfig::default();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
         let orch_config = OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
             checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
@@ -1888,8 +1877,8 @@ mod tests {
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Done);
 
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
-        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
-        let cat_config = CategorizationConfig::default();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
         let orch_config = OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
             checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
@@ -1937,8 +1926,8 @@ mod tests {
             .await;
 
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
-        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
-        let cat_config = CategorizationConfig::default();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
         let orch_config = OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
             checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
@@ -2034,8 +2023,8 @@ mod tests {
             .await;
 
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
-        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
-        let cat_config = CategorizationConfig::default();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
         let orch_config = OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
             checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
@@ -2075,8 +2064,8 @@ mod tests {
 
         let engine = EngineHandle::spawn();
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
-        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
-        let cat_config = CategorizationConfig::default();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
         let orch_config = OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
             checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
@@ -2119,8 +2108,8 @@ mod tests {
 
         let engine = EngineHandle::spawn();
         let repo = Arc::new(MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap());
-        let ollama: Arc<dyn OllamaClient> = Arc::new(FakeOllamaClient::new_categorizing("General", 90, true, "n/a"));
-        let cat_config = Arc::new(CategorizationConfig::default());
+        let ollama: Arc<dyn OllamaClient> = Arc::new(FakeOllamaClient::new_summarizing("n/a"));
+        let cat_config = Arc::new(SummarizeConfig::default());
         let socket_path = app_dir.path().join("engine.sock");
         let orch_config = Arc::new(OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
@@ -2177,8 +2166,8 @@ mod tests {
 
         let engine = EngineHandle::spawn();
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
-        let ollama = FakeOllamaClient::new_categorizing("General", 90, true, "n/a");
-        let cat_config = CategorizationConfig::default();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
         let orch_config = OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
             checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
@@ -2208,7 +2197,6 @@ mod tests {
         let snapshot = engine.snapshot().await;
         assert_eq!(snapshot.len(), 1, "the session must still appear despite the shared checkpoint already being past the prompt");
         assert_eq!(snapshot[0].id, session_id);
-        assert_eq!(snapshot[0].category, "General");
     }
 
     /// Feedback fix: the task line should keep tracking the latest activity,
@@ -2239,9 +2227,9 @@ mod tests {
         // categorization call's JSON response (`generate()` on this fake
         // otherwise always returns the same `default_label` regardless of
         // which prompt it's called with).
-        let fake = Arc::new(FakeOllamaClient::new_categorizing("Backend / API", 90, true, "Refactoring auth middleware"));
+        let fake = Arc::new(FakeOllamaClient::new_summarizing("Refactoring auth middleware"));
         let ollama: Arc<dyn OllamaClient> = fake.clone();
-        let cat_config = Arc::new(CategorizationConfig::default());
+        let cat_config = Arc::new(SummarizeConfig::default());
         let socket_path = app_dir.path().join("engine.sock");
         let orch_config = Arc::new(OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
@@ -2282,9 +2270,9 @@ mod tests {
         };
 
         send("session-start", true).await;
-        recv_until(&mut diffs, |v| v.category != "Uncategorized")
+        recv_until(&mut diffs, |v| v.desc != "Starting…")
             .await
-            .expect("should receive a categorized diff before timing out");
+            .expect("should receive a summarized diff before timing out");
 
         // New activity appears in the transcript before the next turn ends.
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -2336,8 +2324,8 @@ mod tests {
         let engine = EngineHandle::spawn();
         let mut diffs = engine.subscribe();
         let repo = Arc::new(MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap());
-        let ollama: Arc<dyn OllamaClient> = Arc::new(FakeOllamaClient::new_categorizing("Backend / API", 90, true, "Refactoring"));
-        let cat_config = Arc::new(CategorizationConfig::default());
+        let ollama: Arc<dyn OllamaClient> = Arc::new(FakeOllamaClient::new_summarizing("Refactoring"));
+        let cat_config = Arc::new(SummarizeConfig::default());
         let socket_path = app_dir.path().join("engine.sock");
         let orch_config = Arc::new(OrchestratorConfig {
             claude_projects_dir: claude_dir.path().to_path_buf(),
@@ -2373,9 +2361,9 @@ mod tests {
         };
 
         send("session-start").await;
-        recv_until(&mut diffs, |v| v.category != "Uncategorized")
+        recv_until(&mut diffs, |v| v.desc != "Starting…")
             .await
-            .expect("should receive a categorized diff before timing out");
+            .expect("should receive a summarized diff before timing out");
 
         send("stop").await;
         let with_plan = recv_until(&mut diffs, |v| v.plan.is_some())

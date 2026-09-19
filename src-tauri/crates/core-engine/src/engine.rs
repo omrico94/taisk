@@ -29,10 +29,9 @@ pub struct SessionView {
     /// from durable memory on restart, which has no record of the original
     /// entrypoint) — the common case, not a guess in the dark.
     pub entrypoint: String,
-    pub category: String,
     pub state: SessionState,
     /// Short, stable name for the session (e.g. "Auth middleware refactor"),
-    /// set once at categorization time and never refreshed after — distinct
+    /// set once at summary time and never refreshed after — distinct
     /// from `desc`, which is the live, changing "what's happening right
     /// now" line (Phase 2 design change: this used to be a single `task`
     /// field before the title/description split).
@@ -93,14 +92,13 @@ pub struct PlanView {
 }
 
 impl SessionView {
-    pub fn new_uncategorized(id: SessionId, project: String, cwd: String, entrypoint: String, started_at_ms: i64) -> Self {
+    pub fn new_starting(id: SessionId, project: String, cwd: String, entrypoint: String, started_at_ms: i64) -> Self {
         Self {
             id,
             tool: "Claude Code".to_string(),
             project,
             cwd,
             entrypoint,
-            category: "Uncategorized".to_string(),
             state: SessionState::Working,
             title: "Starting…".to_string(),
             desc: "Starting…".to_string(),
@@ -125,7 +123,7 @@ pub enum SessionDiff {
 #[derive(Debug)]
 pub enum EngineCommand {
     /// A session-lifecycle hook fired; advance that session's state machine.
-    /// Creates the session (as Uncategorized/Working) if it doesn't exist yet.
+    /// Creates the session (as Starting…/Working) if it doesn't exist yet.
     SessionEvent {
         id: SessionId,
         event: SessionEvent,
@@ -134,8 +132,7 @@ pub enum EngineCommand {
         entrypoint: Option<String>,
         started_at_ms: Option<i64>,
     },
-    SetCategory { id: SessionId, category: String },
-    /// Set once, at categorization time — see `SessionView::title`'s doc
+    /// Set once, at summary time — see `SessionView::title`'s doc
     /// comment for why this is separate from `SetDesc`.
     SetTitle { id: SessionId, title: String },
     SetDesc { id: SessionId, desc: String },
@@ -162,7 +159,6 @@ pub enum EngineCommand {
     /// Approve/Reject/Send from the drawer (plan §7) — resolves a Waiting
     /// session back to Working with an updated desc line.
     ResolveWaiting { id: SessionId, desc: String },
-    Recategorize { id: SessionId, category: String },
     /// Periodic tick (see `run_idle_sweeper`): any session still `Working`
     /// with no activity for at least `ttl_ms` is presumed to have stopped
     /// (crashed/closed without a clean `TurnEnd`/`SessionEnd`) and moved to
@@ -221,7 +217,7 @@ impl EngineHandle {
                             }
                             sessions.insert(
                                 id.clone(),
-                                SessionView::new_uncategorized(
+                                SessionView::new_starting(
                                     id.clone(),
                                     project.unwrap_or_default(),
                                     cwd.unwrap_or_default(),
@@ -234,12 +230,6 @@ impl EngineHandle {
                         view.state = state::transition(view.state, event);
                         view.last_activity_ms = crate::now_ms();
                         let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
-                    }
-                    EngineCommand::SetCategory { id, category } => {
-                        if let Some(view) = sessions.get_mut(&id) {
-                            view.category = category;
-                            let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
-                        }
                     }
                     EngineCommand::SetTitle { id, title } => {
                         if let Some(view) = sessions.get_mut(&id) {
@@ -284,12 +274,6 @@ impl EngineHandle {
                             view.state = state::transition(view.state, SessionEvent::UserReply);
                             view.desc = desc;
                             view.last_activity_ms = crate::now_ms();
-                            let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
-                        }
-                    }
-                    EngineCommand::Recategorize { id, category } => {
-                        if let Some(view) = sessions.get_mut(&id) {
-                            view.category = category;
                             let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
                         }
                     }
@@ -351,7 +335,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn session_start_creates_an_uncategorized_working_session() {
+    async fn session_start_creates_a_starting_working_session() {
         let engine = EngineHandle::spawn();
         let mut diffs = engine.subscribe();
 
@@ -369,7 +353,7 @@ mod tests {
         let diff = diffs.recv().await.unwrap();
         let SessionDiff::Upserted(view) = diff else { panic!("expected Upserted") };
         assert_eq!(view.id, "s1");
-        assert_eq!(view.category, "Uncategorized");
+        assert_eq!(view.title, "Starting…");
         assert_eq!(view.state, SessionState::Working);
 
         let snapshot = engine.snapshot().await;
@@ -425,28 +409,6 @@ mod tests {
         let SessionDiff::Upserted(view) = diff else { panic!("expected Upserted") };
         assert_eq!(view.id, "real");
         assert_eq!(engine.snapshot().await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn categorization_updates_in_place_without_a_new_session() {
-        let engine = EngineHandle::spawn();
-        engine
-            .dispatch(EngineCommand::SessionEvent {
-                id: "s1".into(),
-                event: SessionEvent::SessionStart,
-                project: Some("api-gateway".into()),
-                cwd: Some("/x".into()),
-                entrypoint: None,
-                started_at_ms: Some(0),
-            })
-            .await;
-        engine
-            .dispatch(EngineCommand::SetCategory { id: "s1".into(), category: "Backend / API".into() })
-            .await;
-
-        let snapshot = engine.snapshot().await;
-        assert_eq!(snapshot.len(), 1, "categorization must not create a duplicate session");
-        assert_eq!(snapshot[0].category, "Backend / API");
     }
 
     #[tokio::test]

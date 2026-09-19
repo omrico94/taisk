@@ -11,7 +11,7 @@ use crate::engine::{PlanStep, PlanView};
 
 /// Absence of a `<session_id>/` directory is the normal case — most sessions
 /// never call `TaskCreate` — and returns `None`, not an error.
-pub fn read_session_plan(tasks_dir: &Path, session_id: &str, category: &str) -> Option<PlanView> {
+pub fn read_session_plan(tasks_dir: &Path, session_id: &str, session_title: &str) -> Option<PlanView> {
     let dir = tasks_dir.join(session_id);
     let entries = std::fs::read_dir(&dir).ok()?;
 
@@ -40,7 +40,7 @@ pub fn read_session_plan(tasks_dir: &Path, session_id: &str, category: &str) -> 
     // ordering signal in the real data).
     steps.sort_by_key(|(numeric_id, _)| numeric_id.unwrap_or(i64::MAX));
 
-    Some(PlanView { title: format!("{category} plan"), steps: steps.into_iter().map(|(_, step)| step).collect() })
+    Some(PlanView { title: format!("{session_title} plan"), steps: steps.into_iter().map(|(_, step)| step).collect() })
 }
 
 #[cfg(test)]

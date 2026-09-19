@@ -3,7 +3,6 @@
 
 pub mod api;
 pub mod bootstrap;
-pub mod categorize;
 pub mod collector;
 pub mod engine;
 pub mod first_run;
@@ -14,6 +13,7 @@ pub mod orchestrator;
 pub mod plan;
 pub mod settings_merge;
 pub mod state;
+pub mod summarize;
 pub mod tasks;
 
 pub(crate) fn now_ms() -> i64 {

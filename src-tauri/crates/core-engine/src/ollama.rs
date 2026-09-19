@@ -220,18 +220,11 @@ pub mod fake {
         }
 
         /// Builds a client whose `generate()` always returns a canned JSON
-        /// response matching the categorization pipeline's expected shape
-        /// (`{"category","confidence","is_new","task_summary"}`) — for
-        /// testing `categorize_session`, which parses `generate()`'s output
-        /// as JSON rather than treating it as a plain label.
-        pub fn new_categorizing(category: impl Into<String>, confidence: u8, is_new: bool, task_summary: impl Into<String>) -> Self {
-            let json = serde_json::json!({
-                "category": category.into(),
-                "confidence": confidence,
-                "is_new": is_new,
-                "task_summary": task_summary.into(),
-            })
-            .to_string();
+        /// response matching the summary pipeline's expected shape
+        /// (`{"task_summary"}`) — for testing `summarize_session`, which
+        /// parses `generate()`'s output as JSON rather than a plain label.
+        pub fn new_summarizing(task_summary: impl Into<String>) -> Self {
+            let json = serde_json::json!({ "task_summary": task_summary.into() }).to_string();
             Self::new(json)
         }
     }
@@ -304,7 +297,7 @@ mod live_smoke_test {
         let label = client
             .generate(
                 "qwen2.5:1.5b",
-                "In 1-3 words, what category of software work is this: 'refactor auth middleware to async/await'?",
+                "In 1-3 words, what kind of software work is this: 'refactor auth middleware to async/await'?",
             )
             .await
             .expect("generate call should succeed");

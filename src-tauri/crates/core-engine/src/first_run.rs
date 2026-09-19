@@ -134,8 +134,7 @@ pub async fn backfill_existing_sessions(
                     // to feed live-session reconstruction, only search.
                     cwd: String::new(),
                     tool: "Claude Code".to_string(),
-                    category: "Uncategorized".to_string(),
-                    // No categorization pass runs during backfill (see the
+                    // No summary pass runs during backfill (see the
                     // `cwd` comment above — these rows only feed search, not
                     // live reconstruction), so there's no LLM title to store.
                     title: String::new(),
@@ -211,7 +210,7 @@ mod tests {
         std::fs::write(claude_dir.path().join("-Users-omricohen-api-gateway").join("notes.txt"), "ignore me").unwrap();
 
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
-        let ollama = FakeOllamaClient::new("Uncategorized");
+        let ollama = FakeOllamaClient::new("General");
 
         let count = backfill_existing_sessions(claude_dir.path(), &repo, &ollama, "nomic-embed-text").await;
         assert_eq!(count, 2);

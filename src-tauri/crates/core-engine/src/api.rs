@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 
-use crate::categorize::CategorizationConfig;
+use crate::summarize::SummarizeConfig;
 use crate::collector::{parse_transcript_for_display, transcript_path, TranscriptRow};
 use crate::engine::{EngineCommand, EngineHandle, SessionView};
 use crate::memory_repo::{MemoryRepo, PurgeScope};
@@ -31,7 +31,7 @@ pub struct AppState {
     pub engine: EngineHandle,
     pub repo: Arc<MemoryRepo>,
     pub ollama: Arc<dyn OllamaClient>,
-    pub config: Arc<CategorizationConfig>,
+    pub config: Arc<SummarizeConfig>,
     pub claude_projects_dir: PathBuf,
     /// Shared with `orchestrator::run` — approve/reject/reply from the board
     /// resolve a `Waiting` session the same way a real hook would, so they
@@ -58,11 +58,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/approve", post(approve))
         .route("/sessions/{id}/reject", post(reject))
         .route("/sessions/{id}/reply", post(reply))
-        .route("/sessions/{id}/recategorize", post(recategorize))
         .route("/sessions/{id}/transcript", get(get_transcript))
         .route("/sessions/{id}", delete(delete_session))
-        .route("/categories", get(list_categories).post(create_category))
-        .route("/categories/{name}", delete(delete_category))
         .route("/search", get(search))
         .route("/memories", delete(purge_memories))
         // Frontend (Tauri webview / Vite dev server) and this API are
@@ -253,79 +250,6 @@ async fn get_transcript(State(state): State<AppState>, Path(id): Path<String>) -
 }
 
 #[derive(Deserialize)]
-struct RecategorizeBody {
-    category: String,
-}
-
-async fn recategorize(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(body): Json<RecategorizeBody>,
-) -> StatusCode {
-    state.engine.dispatch(EngineCommand::Recategorize { id, category: body.category }).await;
-    StatusCode::OK
-}
-
-/// All known categories, oldest-first so a newly created empty lane appends
-/// at the end of the board rather than jumping into alphabetical order
-/// (matches the design's `cats.push(name)` — new categories are additive,
-/// not resorted).
-async fn list_categories(State(state): State<AppState>) -> Json<Vec<String>> {
-    let mut exemplars = state.repo.list_exemplars().await.unwrap_or_default();
-    exemplars.sort_by_key(|e| e.created_at);
-    Json(exemplars.into_iter().map(|e| e.category).collect())
-}
-
-#[derive(Deserialize)]
-struct CreateCategoryBody {
-    name: String,
-}
-
-/// Creates a new, empty category (Phase 2 §5 — the board's "+ New category"
-/// control). Seeds its exemplar from the category name's own embedding
-/// (`MemoryRepo::create_category`'s doc comment) since no session prompt
-/// exists yet to seed it from.
-async fn create_category(State(state): State<AppState>, Json(body): Json<CreateCategoryBody>) -> StatusCode {
-    let name = body.name.trim();
-    if name.is_empty() {
-        return StatusCode::BAD_REQUEST;
-    }
-    let Ok(embedding) = state.ollama.embed(&state.config.embedding_model, name).await else {
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    };
-    match state.repo.create_category(name, embedding, crate::now_ms()).await {
-        Ok(_) => StatusCode::OK,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
-/// Deletes a category and cascades to every session currently live in it
-/// (the board's "Delete category" action) — each one goes through the exact
-/// same path a single-session delete does (durably dismissed, then removed
-/// from the live engine), so none of them reappear on the next restart
-/// either. The category's exemplar is removed last, after the cascade has
-/// been dispatched, so a crash mid-request leaves the category still
-/// visible (with its remaining sessions) rather than silently vanishing
-/// while live sessions still claim to belong to it.
-async fn delete_category(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
-    let sessions = state.engine.snapshot().await;
-    for session in sessions.into_iter().filter(|s| s.category == name) {
-        {
-            let mut dismissed = state.dismissed_sessions.lock().await;
-            dismissed.mark_dismissed(session.id.clone());
-            let _ = dismissed.save();
-        }
-        unmark_waiting(&state, &session.id).await;
-        state.engine.dispatch(EngineCommand::RemoveSession { id: session.id }).await;
-    }
-
-    match state.repo.delete_exemplar(&name).await {
-        Ok(_) => StatusCode::OK,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
-#[derive(Deserialize)]
 struct SearchQuery {
     q: String,
 }
@@ -335,7 +259,6 @@ struct SearchResult {
     text: String,
     project: String,
     tool: String,
-    category: String,
     session_id: String,
     distance: f32,
     /// Distinguishes a live session's content from purely historical memory
@@ -373,7 +296,6 @@ async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> 
                 text: r.memory.text,
                 project: r.memory.project,
                 tool: r.memory.tool,
-                category: r.memory.category,
                 session_id: r.memory.session_id,
                 distance: r.distance,
                 created_at: r.memory.created_at,
@@ -407,7 +329,7 @@ async fn purge_memories(State(state): State<AppState>, Query(q): Query<PurgeQuer
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory_repo::{Exemplar, Memory, MemoryKind};
+    use crate::memory_repo::{Memory, MemoryKind};
     use crate::ollama::fake::FakeOllamaClient;
     use crate::state::SessionEvent;
     use futures::StreamExt;
@@ -432,7 +354,7 @@ mod tests {
             engine: EngineHandle::spawn(),
             repo: Arc::new(repo),
             ollama: Arc::new(FakeOllamaClient::new("Backend / API")),
-            config: Arc::new(CategorizationConfig::default()),
+            config: Arc::new(SummarizeConfig::default()),
             claude_projects_dir,
             waiting_sessions: Arc::new(Mutex::new(WaitingSessions::load(&waiting_sessions_path))),
             dismissed_sessions: Arc::new(Mutex::new(DismissedSessions::load(&dismissed_sessions_path))),
@@ -587,7 +509,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approve_reject_reply_and_recategorize_resolve_via_engine() {
+    async fn approve_reject_and_reply_resolve_via_engine() {
         let (base, state) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
@@ -629,14 +551,6 @@ mod tests {
         assert_eq!(resp.status(), 200);
         assert_eq!(state.engine.snapshot().await[0].desc, "Working on: please also add tests");
 
-        let resp = client
-            .post(format!("{base}/sessions/s1/recategorize"))
-            .json(&serde_json::json!({"category": "Frontend"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-        assert_eq!(state.engine.snapshot().await[0].category, "Frontend");
     }
 
     #[tokio::test]
@@ -695,15 +609,9 @@ mod tests {
                 project: "api-gateway".into(),
                 cwd: "/x".into(),
                 tool: "Claude Code".into(),
-                category: "Backend / API".into(),
                 title: "Refactor auth middleware".into(),
                 created_at: 0,
             })
-            .await
-            .unwrap();
-        state
-            .repo
-            .upsert_exemplar(&Exemplar { category: "Backend / API".into(), exemplar_embedding: embedding, created_at: 0 })
             .await
             .unwrap();
 
@@ -732,110 +640,6 @@ mod tests {
         assert!(results.is_empty(), "purge(all) should remove every memory row");
     }
 
-    #[tokio::test]
-    async fn create_category_then_list_categories_returns_it_in_creation_order() {
-        let (base, _state) = spawn_test_server().await;
-        let client = reqwest::Client::new();
-
-        let empty: Vec<String> = client.get(format!("{base}/categories")).send().await.unwrap().json().await.unwrap();
-        assert!(empty.is_empty());
-
-        let resp = client
-            .post(format!("{base}/categories"))
-            .json(&serde_json::json!({"name": "Ops / Infra"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-
-        // Guarantees a distinct `created_at` millisecond from the first
-        // category, so ordering below is asserting real `created_at` sort
-        // behavior rather than incidentally relying on LanceDB's row order.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-
-        // A second category, created after the first, must sort after it —
-        // creation order, not alphabetical (design: new lanes append at the
-        // end of the board).
-        let resp = client
-            .post(format!("{base}/categories"))
-            .json(&serde_json::json!({"name": "Aardvark"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-
-        let categories: Vec<String> = client.get(format!("{base}/categories")).send().await.unwrap().json().await.unwrap();
-        assert_eq!(categories, vec!["Ops / Infra".to_string(), "Aardvark".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn create_category_rejects_a_blank_name() {
-        let (base, _state) = spawn_test_server().await;
-        let client = reqwest::Client::new();
-
-        let resp = client
-            .post(format!("{base}/categories"))
-            .json(&serde_json::json!({"name": "   "}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 400);
-    }
-
-    #[tokio::test]
-    async fn delete_category_cascades_to_its_live_sessions_and_removes_the_lane() {
-        let (base, state) = spawn_test_server().await;
-        let client = reqwest::Client::new();
-
-        let resp = client
-            .post(format!("{base}/categories"))
-            .json(&serde_json::json!({"name": "Ops / Infra"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-
-        for id in ["s1", "s2"] {
-            state
-                .engine
-                .dispatch(EngineCommand::SessionEvent {
-                    id: id.into(),
-                    event: SessionEvent::SessionStart,
-                    project: None,
-                    cwd: None,
-                    started_at_ms: None,
-                    entrypoint: None,
-                })
-                .await;
-            state.engine.dispatch(EngineCommand::SetCategory { id: id.into(), category: "Ops / Infra".into() }).await;
-        }
-        // An unrelated session in a different category must survive.
-        state
-            .engine
-            .dispatch(EngineCommand::SessionEvent {
-                id: "other".into(),
-                event: SessionEvent::SessionStart,
-                project: None,
-                cwd: None,
-                started_at_ms: None,
-                entrypoint: None,
-            })
-            .await;
-        assert_eq!(state.engine.snapshot().await.len(), 3);
-
-        let resp = client.delete(format!("{base}/categories/{}", "Ops%20%2F%20Infra")).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-
-        let snapshot = state.engine.snapshot().await;
-        assert_eq!(snapshot.len(), 1, "both sessions in the deleted category must be removed, the other left alone");
-        assert_eq!(snapshot[0].id, "other");
-        assert!(state.dismissed_sessions.lock().await.contains("s1"));
-        assert!(state.dismissed_sessions.lock().await.contains("s2"));
-
-        let categories: Vec<String> = client.get(format!("{base}/categories")).send().await.unwrap().json().await.unwrap();
-        assert!(!categories.contains(&"Ops / Infra".to_string()), "the deleted category must no longer be known");
-    }
-
     /// Regression (user report, twice — search for a query as literal as
     /// "todo" against a memory whose text contains "Todo list" came back
     /// empty): there is no hard relevance floor. Both a near-exact match and
@@ -861,7 +665,6 @@ mod tests {
                 project: "api-gateway".into(),
                 cwd: "/x".into(),
                 tool: "Claude Code".into(),
-                category: "Backend / API".into(),
                 title: "Refactor auth middleware".into(),
                 created_at: 0,
             })
@@ -886,7 +689,6 @@ mod tests {
                 project: "api-gateway".into(),
                 cwd: "/x".into(),
                 tool: "Claude Code".into(),
-                category: "Backend / API".into(),
                 title: "Refactor auth middleware".into(),
                 created_at: 0,
             })

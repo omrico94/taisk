@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::api::AppState;
-use crate::categorize::CategorizationConfig;
+use crate::summarize::SummarizeConfig;
 use crate::engine::EngineHandle;
 use crate::memory_repo::MemoryRepo;
 use crate::ollama::OllamaClient;
@@ -38,7 +38,7 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
 
     let repo = Arc::new(MemoryRepo::open(crate::first_run::lancedb_dir().to_str().unwrap()).await?);
     let engine = EngineHandle::spawn();
-    let cat_config = Arc::new(CategorizationConfig::default());
+    let cat_config = Arc::new(SummarizeConfig::default());
     let orch_config = Arc::new(OrchestratorConfig::default());
     // Shared with the orchestrator: approve/reject/reply from the board must
     // evict the same durable "waiting" record a real hook resolution would

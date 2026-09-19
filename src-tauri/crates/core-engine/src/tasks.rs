@@ -310,7 +310,7 @@ mod tests {
     use super::*;
 
     fn session(id: &str, state: SessionState) -> SessionView {
-        let mut s = SessionView::new_uncategorized(id.into(), "proj".into(), "/tmp".into(), "cli".into(), 0);
+        let mut s = SessionView::new_starting(id.into(), "proj".into(), "/tmp".into(), "cli".into(), 0);
         s.state = state;
         s
     }
