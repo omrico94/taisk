@@ -1,8 +1,9 @@
+import { deleteTask } from "../api";
 import { useSessionStore } from "../store/sessionStore";
 import { taskMeta, taskRollup } from "../store/selectors";
 import { fmtCost, fmtTokens, toolColorVar } from "../styles/sessionStyle";
 import type { SessionView, Task } from "../types";
-import { moveSession } from "./boardActions";
+import { beginDrag, endDrag, getDrag, moveSession } from "./boardActions";
 import { SessionRow } from "./SessionRow";
 import styles from "./Kanban.module.css";
 
@@ -16,9 +17,7 @@ export function TaskCard({ task, sessions }: Props) {
   const toggle = useSessionStore((s) => s.toggleTaskCollapsed);
   const drag = useSessionStore((s) => s.drag);
   const overTaskId = useSessionStore((s) => s.overTaskId);
-  const setDrag = useSessionStore((s) => s.setDrag);
   const setOver = useSessionStore((s) => s.setOver);
-  const clearDrag = useSessionStore((s) => s.clearDrag);
 
   const roll = taskRollup(sessions);
   const { project, tool } = taskMeta(sessions);
@@ -43,11 +42,11 @@ export function TaskCard({ task, sessions }: Props) {
       onDragStart={(e) => {
         e.dataTransfer.setData("text/plain", task.id);
         e.dataTransfer.effectAllowed = "move";
-        setDrag({ kind: "task", taskId: task.id, sessId: null, srcTaskId: null });
+        beginDrag({ kind: "task", taskId: task.id, sessId: null, srcTaskId: null });
       }}
-      onDragEnd={clearDrag}
+      onDragEnd={endDrag}
       onDragOver={(e) => {
-        if (drag.kind !== "session") return; // task drags fall through to the column
+        if (getDrag().kind !== "session") return; // task drags fall through to the column
         e.preventDefault();
         e.stopPropagation();
         if (overTaskId !== task.id) setOver({ task: task.id, tray: false });
@@ -56,11 +55,12 @@ export function TaskCard({ task, sessions }: Props) {
         if (!e.currentTarget.contains(e.relatedTarget as Node | null) && overTaskId === task.id) setOver({ task: null });
       }}
       onDrop={(e) => {
-        if (drag.kind !== "session" || !drag.sessId) return;
+        const d = getDrag();
+        if (d.kind !== "session" || !d.sessId) return;
         e.preventDefault();
         e.stopPropagation();
-        moveSession(drag.sessId, task.id);
-        clearDrag();
+        moveSession(d.sessId, task.id);
+        endDrag();
       }}
       onClick={() => toggle(task.id)}
     >
@@ -70,9 +70,21 @@ export function TaskCard({ task, sessions }: Props) {
             {tool}
           </span>
         )}
-        <span className={styles.taskProject}>{project}</span>
+        {sessions.length > 0 && <span className={styles.taskProject}>{project}</span>}
         <span className={styles.spacer} />
         {roll.needsYou && <span className={styles.needsPill}>● Needs you</span>}
+        <button
+          className={`${styles.iconButton} ${styles.iconDelete} ${styles.taskDelete}`}
+          title="Delete task (its sessions return to the tray)"
+          aria-label="Delete task"
+          data-testid="delete-task"
+          onClick={(e) => {
+            e.stopPropagation();
+            void deleteTask(task.id);
+          }}
+        >
+          ✕
+        </button>
       </div>
       <div className={styles.taskTitle}>{task.title}</div>
 

@@ -3,29 +3,30 @@ import { fmtTokens } from "../styles/sessionStyle";
 import { ORPHAN } from "../store/selectors";
 import { useSessionStore } from "../store/sessionStore";
 import type { SessionView } from "../types";
-import { moveSession } from "./boardActions";
+import { beginDrag, endDrag, getDrag, moveSession } from "./boardActions";
 import { SessionStateDot } from "./SessionStateDot";
 import styles from "./Kanban.module.css";
 
 interface Props {
   sessions: SessionView[];
+  /** Empty tray shown only as a mid-drag drop target (overlays, no layout shift). */
+  floating?: boolean;
 }
 
 /** Sessions with no task. Also a drop target: drop a session here to unassign it. */
-export function UnassignedTray({ sessions }: Props) {
+export function UnassignedTray({ sessions, floating }: Props) {
   const drag = useSessionStore((s) => s.drag);
   const overTray = useSessionStore((s) => s.overTray);
   const setOver = useSessionStore((s) => s.setOver);
-  const clearDrag = useSessionStore((s) => s.clearDrag);
 
   const hot = drag.kind === "session" && overTray;
 
   return (
     <div
-      className={`${styles.tray} ${hot ? styles.trayHot : ""}`}
+      className={`${styles.tray} ${hot ? styles.trayHot : ""} ${floating ? styles.trayFloating : ""}`}
       data-testid="tray"
       onDragOver={(e) => {
-        if (drag.kind !== "session") return;
+        if (getDrag().kind !== "session") return;
         e.preventDefault();
         if (!overTray) setOver({ tray: true, task: null });
       }}
@@ -33,10 +34,11 @@ export function UnassignedTray({ sessions }: Props) {
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver({ tray: false });
       }}
       onDrop={(e) => {
-        if (drag.kind !== "session" || !drag.sessId) return;
+        const d = getDrag();
+        if (d.kind !== "session" || !d.sessId) return;
         e.preventDefault();
-        moveSession(drag.sessId, null);
-        clearDrag();
+        moveSession(d.sessId, null);
+        endDrag();
       }}
     >
       <div className={styles.trayHeader}>
@@ -58,8 +60,6 @@ export function UnassignedTray({ sessions }: Props) {
 
 function TrayChip({ session }: { session: SessionView }) {
   const selectCard = useSessionStore((s) => s.selectCard);
-  const setDrag = useSessionStore((s) => s.setDrag);
-  const clearDrag = useSessionStore((s) => s.clearDrag);
   const openAssignMenu = useSessionStore((s) => s.openAssignMenu);
 
   return (
@@ -72,16 +72,16 @@ function TrayChip({ session }: { session: SessionView }) {
       onDragStart={(e) => {
         e.dataTransfer.setData("text/plain", session.id);
         e.dataTransfer.effectAllowed = "move";
-        setDrag({ kind: "session", taskId: null, sessId: session.id, srcTaskId: ORPHAN });
+        beginDrag({ kind: "session", taskId: null, sessId: session.id, srcTaskId: ORPHAN });
       }}
-      onDragEnd={clearDrag}
+      onDragEnd={endDrag}
     >
       <SessionStateDot state={session.state} />
       <span className={styles.chipTitle} onClick={() => selectCard(session.id)}>
         {session.title}
       </span>
       {session.subs.length > 0 && <span className={styles.subCount}>⤷{session.subs.length}</span>}
-      <span className={styles.tokenCount}>{fmtTokens(session.tokens)}</span>
+      {session.tokens > 0 && <span className={styles.tokenCount}>{fmtTokens(session.tokens)}</span>}
       <button
         className={styles.assignButton}
         title="Assign to a task"

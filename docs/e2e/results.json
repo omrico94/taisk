@@ -1,0 +1,403 @@
+[
+  {
+    "id": "E01",
+    "title": "First launch, empty board",
+    "pass": true,
+    "shots": [
+      "E01-empty-board.png"
+    ],
+    "checks": [
+      "column Backlog",
+      "count backlog = 0",
+      "column To Do",
+      "count todo = 0",
+      "column In Progress",
+      "count inprogress = 0",
+      "column Done",
+      "count done = 0",
+      "tray hidden when there are no sessions",
+      "status pill: 0\nworking\n·\n0\nneed you",
+      "WIP badge 0/5"
+    ],
+    "ms": 11195
+  },
+  {
+    "id": "E02",
+    "title": "Add task in each column (Enter commits, Esc cancels, empty discarded, persists)",
+    "pass": true,
+    "shots": [
+      "E02-four-tasks.png",
+      "E02-after-reload.png"
+    ],
+    "checks": [
+      "composer closed on Esc",
+      "Esc did not create a task",
+      "empty submit discarded",
+      "stages Backlog task:backlog,Doing task:inprogress,Finished task:done,Todo task:todo",
+      "persisted after reload"
+    ],
+    "ms": 11587
+  },
+  {
+    "id": "E03",
+    "title": "New sessions land in the Unassigned tray with the right state dots",
+    "pass": true,
+    "shots": [
+      "E03-tray-states.png"
+    ],
+    "checks": [
+      "tray count 4",
+      "dot states Working,Waiting,Done,Working",
+      "waiting dot amber, got rgb(251, 191, 36)",
+      "working dot breathes, got _breathe_ri04i_1",
+      "tray hint copy"
+    ],
+    "ms": 11374
+  },
+  {
+    "id": "E04",
+    "title": "Assign a session via the ▾ menu",
+    "pass": true,
+    "shots": [
+      "E04-menu-open.png",
+      "E04-assigned.png"
+    ],
+    "checks": [
+      "menu is position:fixed",
+      "menu is 210px wide",
+      "one row per task",
+      "closes on outside click",
+      "closes on Escape",
+      "chip left the tray",
+      "row in the task card",
+      "tray count 1",
+      "assignment persisted in backend"
+    ],
+    "ms": 11825
+  },
+  {
+    "id": "E05",
+    "title": "Assign by dragging a tray chip onto a task card (drop outline + FLIP)",
+    "pass": true,
+    "shots": [
+      "E05-dragging-over-card.png",
+      "E05-just-dropped.png"
+    ],
+    "checks": [
+      "FLIP animation ran after the move (2)",
+      "assigned via drag"
+    ],
+    "ms": 12638
+  },
+  {
+    "id": "E06",
+    "title": "Move a session from one task to another by drag",
+    "pass": true,
+    "shots": [
+      "E06-moved-between-tasks.png"
+    ],
+    "checks": [
+      "A has 1 session",
+      "B has 1 session",
+      "B rollup label"
+    ],
+    "ms": 12786
+  },
+  {
+    "id": "E07",
+    "title": "Unassign via ↩ on the row, via the overlay button, and by dragging onto the tray",
+    "pass": true,
+    "shots": [
+      "E07-overlay-with-unassign.png",
+      "E07-all-unassigned.png"
+    ],
+    "checks": [
+      "tray hidden with no orphans",
+      "overlay names the task",
+      "overlay closed after unassign",
+      "all three unassigned in backend"
+    ],
+    "ms": 15011
+  },
+  {
+    "id": "E08",
+    "title": "Drag a task card across every column (highlight, ghost opacity, persistence)",
+    "pass": true,
+    "shots": [
+      "E08-dragging-over-todo.png",
+      "E08-back-in-backlog.png"
+    ],
+    "checks": [
+      "final stage persisted after reload"
+    ],
+    "ms": 15013
+  },
+  {
+    "id": "E09",
+    "title": "WIP badge turns red past the limit",
+    "pass": true,
+    "shots": [
+      "E09-wip-at-limit.png",
+      "E09-wip-over-limit.png"
+    ],
+    "checks": [
+      "5/5 at the limit",
+      "not red at the limit",
+      "6/5 over the limit",
+      "red over the limit, got rgb(248, 113, 113)"
+    ],
+    "ms": 11520
+  },
+  {
+    "id": "E10",
+    "title": "Task card rollup: progress, sums, session count, expand/collapse",
+    "pass": true,
+    "shots": [
+      "E10-expanded.png",
+      "E10-collapsed.png",
+      "E10-done-card.png"
+    ],
+    "checks": [
+      "3 sessions label",
+      "cost sum $0.02 in: Claude Code | api-gateway | ✕ | Rollup task | 1/3 done | First session prompt words | ↩ | ✕ | Second session prompt words | ↩ | ✕ | Third session prompt words | 4K | ↩ | ✕ | 3 sessions | 4K | $0.02",
+      "token sum shown",
+      "bar 33%, got 33%",
+      "was expanded by default",
+      "Done card opacity .72"
+    ],
+    "ms": 12995
+  },
+  {
+    "id": "E11",
+    "title": "Waiting flow: needs-you card, status pill, Approve / Reject / Send hit distinct endpoints",
+    "pass": true,
+    "shots": [
+      "E11-needs-you.png",
+      "E11-overlay-waiting.png",
+      "E11-resolved.png"
+    ],
+    "checks": [
+      "waitGlow animation, got _waitGlow_ri04i_1",
+      "amber border, got rgba(251, 191, 36, 0.55)",
+      "status pill counts 3 waiting",
+      "reply text reached the engine",
+      "three distinct endpoints: POST /sessions/s1/approve, POST /sessions/s2/reject, POST /sessions/s3/reply"
+    ],
+    "ms": 14589
+  },
+  {
+    "id": "E12",
+    "title": "AskUserQuestion pre-tool-use special case → Waiting",
+    "pass": true,
+    "shots": [
+      "E12-ask-user-question.png"
+    ],
+    "checks": [],
+    "ms": 11375
+  },
+  {
+    "id": "E13",
+    "title": "Working / Done visual treatments",
+    "pass": true,
+    "shots": [
+      "E13-working-and-done.png"
+    ],
+    "checks": [
+      "cyan glow on a working task: rgba(56, 189, 248, 0.03) 0px 0px 0px 0.220919px, rgba(56, 189, 248, 0.09) 0px 1.76735px 6.62758px -3.09287px",
+      "done task dimmed",
+      "done dot green"
+    ],
+    "ms": 11250
+  },
+  {
+    "id": "E14",
+    "title": "Auto rollup: all sessions Done → task moves to Done; a live session pulls it back",
+    "pass": true,
+    "shots": [
+      "E14-moved-to-done.png",
+      "E14-pulled-back.png"
+    ],
+    "checks": [
+      "one done, one working → stays In Progress",
+      "backend agrees"
+    ],
+    "ms": 12754
+  },
+  {
+    "id": "E15",
+    "title": "Session overlay: identity, stats, ctx colours, subagents, plan, transcript, close paths",
+    "pass": true,
+    "shots": [
+      "E15-overlay-full.png",
+      "E15-overlay-scrolled.png"
+    ],
+    "checks": [
+      "cyan <70%: {\"w\":\"50%\",\"bg\":\"var(--state-working)\"}",
+      "amber 70-89%: {\"w\":\"75%\",\"bg\":\"var(--state-waiting)\"}",
+      "red ≥90%: {\"w\":\"95%\",\"bg\":\"var(--state-danger)\"}",
+      "subagents section; overlay text: DONE | 0m | ↩ Unassign | Delete session | ✕ | Claude Code | api-gateway | High context session here | High context session here | part of task Overlay task | TOKENS | 4K | COST | $0.05 | CONTEXT WINDOW | 190K / 200K | 95% | ⤷ | 1 SUBAGENT | Investigate flaky tests | WORKING | Look at CI history for flaky tests | ◇ 1K | $0.01 | ◧ | High context session here plan | 2/3 | ✓ | Write failing test | ✓ |",
+      "plan card with 2/3",
+      "transcript tail rows: Investigate flaky tests | WORKING | Look at CI history for flaky tests | ◇ 1K | $0.01 | ◧ | High context session here plan | 2/3 | ✓ | Write failing test | ✓ | Fix the bug | Refactor helper | TRANSCRIPT TAIL | YOU |  | High context session here |  | CLAUDE |  | On it — High context session here |  | CLAUDE |  | more work |  | Jump into this session ↗",
+      "stats card",
+      "part-of-task caption",
+      "panel 448px/20px radius, got {\"w\":448,\"r\":\"20px\"}",
+      "closes via ✕",
+      "no caption for an unassigned session"
+    ],
+    "ms": 14771
+  },
+  {
+    "id": "E16",
+    "title": "Jump into session: enabled for CLI, disabled for Desktop",
+    "pass": true,
+    "shots": [
+      "E16-jump-enabled.png",
+      "E16-jump-disabled.png"
+    ],
+    "checks": [
+      "CLI session: jump enabled",
+      "Desktop session: jump disabled"
+    ],
+    "ms": 11720
+  },
+  {
+    "id": "E17",
+    "title": "Delete a session from the row, the chip and the overlay — and it stays gone after restart",
+    "pass": true,
+    "shots": [
+      "E17-overlay-confirm-delete.png",
+      "E17-after-restart.png"
+    ],
+    "checks": [
+      "overlay delete is two-click (arm)",
+      "assignment dropped with the session",
+      "only the survivor after restart, got s4"
+    ],
+    "ms": 25610
+  },
+  {
+    "id": "E18",
+    "title": "Delete a task: its sessions return to the tray",
+    "pass": true,
+    "shots": [
+      "E18-hover-delete-button.png",
+      "E18-after-delete.png"
+    ],
+    "checks": [
+      "other task untouched",
+      "assignment dropped"
+    ],
+    "ms": 12755
+  },
+  {
+    "id": "E19",
+    "title": "Persistence across a backend restart",
+    "pass": true,
+    "shots": [
+      "E19-before-restart.png",
+      "E19-after-restart.png"
+    ],
+    "checks": [
+      "tasks in their stages",
+      "s1 still attached",
+      "s2 still attached",
+      "s3 still an orphan",
+      "ended session reconstructs as Done",
+      "done task not bounced by reconstruction"
+    ],
+    "ms": 21755
+  },
+  {
+    "id": "E20",
+    "title": "WebSocket reconnect: board refetches and stays consistent",
+    "pass": true,
+    "shots": [
+      "E20-backend-down.png",
+      "E20-reconnected.png"
+    ],
+    "checks": [
+      "stale state kept while down",
+      "old task still there (persisted)"
+    ],
+    "ms": 26309
+  },
+  {
+    "id": "E21",
+    "title": "⌘K Ask memory and the toolbar filter stay independent; no category field",
+    "pass": true,
+    "shots": [
+      "E21-filtered.png",
+      "E21-ask-memory.png",
+      "E21-no-results.png"
+    ],
+    "checks": [
+      "matching task kept",
+      "Ask overlay input independent of the toolbar filter",
+      "Ask overlay shows a billing memory",
+      "toolbar filter untouched by Ask typing",
+      "search results have no category: [\"text\",\"project\",\"tool\",\"session_id\",\"distance\",\"live\",\"created_at\"]",
+      "no 'category' text anywhere in the UI"
+    ],
+    "ms": 12557
+  },
+  {
+    "id": "E22",
+    "title": "Hide-idle toggle for orphan sessions",
+    "pass": true,
+    "shots": [
+      "E22-idle-hidden.png",
+      "E22-idle-shown.png"
+    ],
+    "checks": [
+      "toggle relabelled"
+    ],
+    "ms": 13862
+  },
+  {
+    "id": "E23",
+    "title": "Edge cases: long titles, many sessions, empty task, horizontal scroll, reduced motion",
+    "pass": true,
+    "shots": [
+      "E23-many-sessions.png",
+      "E23-narrow.png"
+    ],
+    "checks": [
+      "empty task copy",
+      "long session title truncates: {\"over\":true,\"ell\":\"ellipsis\"}",
+      "card content does not overflow horizontally",
+      "column body scrolls with many sessions",
+      "columns row scrolls horizontally when narrow",
+      "prefers-reduced-motion: no FLIP animations (0)"
+    ],
+    "ms": 14228,
+    "note": "legacy dir tables: __manifest, category_exemplars.lance, memories.lance; reconstructed 0 live sessions; search returned 10 rows"
+  },
+  {
+    "id": "E24",
+    "title": "Category removal regression + legacy data dir migrates",
+    "pass": true,
+    "shots": [
+      "E24-no-category-ui.png"
+    ],
+    "checks": [
+      "GET /categories gone",
+      "POST /categories gone",
+      "recategorize gone",
+      "SessionView has no category",
+      "copied the real data dir (read-only copy; the original is untouched)",
+      "legacy data dir boots and serves /sessions",
+      "search works against the legacy LanceDB"
+    ],
+    "ms": 21243
+  },
+  {
+    "id": "E25",
+    "title": "Visual check: populated board next to the design prototype (view 1a)",
+    "pass": true,
+    "shots": [
+      "E25-live-board.png"
+    ],
+    "checks": [],
+    "ms": 15732
+  }
+]

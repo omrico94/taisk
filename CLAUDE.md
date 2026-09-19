@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-SessionBoard is a local-first Tauri (Rust) + React/TypeScript desktop app. It watches every running Claude Code session on the machine (CLI and Desktop), turns each into a live card grouped by category, drives that card's state from Claude Code's own hooks, and backs semantic search over session history with an embedded LanceDB vector store. All inference (categorization, embeddings) runs through a local Ollama instance — no cloud calls, no accounts, no API keys anywhere in this codebase.
+SessionBoard is a local-first Tauri (Rust) + React/TypeScript desktop app. It watches every running Claude Code session on the machine (CLI and Desktop), turns each into a live session that the user files under Kanban tasks (Backlog / To Do / In Progress / Done), drives that session's state from Claude Code's own hooks, and backs semantic search over session history with an embedded LanceDB vector store. All inference (session titles/summaries, embeddings) runs through a local Ollama instance — no cloud calls, no accounts, no API keys anywhere in this codebase.
 
 There's a project-scoped setup skill at `.claude/skills/install-sessionboard/` — use it (or read it) before assuming a dependency is missing.
 
@@ -43,15 +43,18 @@ Claude Code hook fires
   → orchestrator::handle_hook_event  (src-tauri/crates/core-engine/src/orchestrator.rs)
       - maps the hook's event name to a state::SessionEvent
       - session-start: polls for the transcript file, extracts the initiating
-        prompt, then kicks off categorize_session (Ollama call, off the
-        critical path — the card appears as "Uncategorized" immediately)
+        prompt, then kicks off summarize_session (Ollama call, off the
+        critical path — the session appears as "Starting…" immediately)
       - stop: refreshes the task-summary line from the latest transcript activity
   → engine::EngineHandle  (single-owner actor, owns the live session HashMap)
       - every mutation goes through state::transition(current, event) — the
         one place state changes happen, table-tested for every (state, event) pair
       - broadcasts a SessionDiff on every change
-  → api::router (axum, localhost:37888)  — GET /sessions, WS /events, POST
-    approve/reject/reply/recategorize, GET /search
+  → tasks::TaskHub  (tasks.json: tasks + session→task assignments; backend-owned
+    Done rollup; broadcasts a full TasksSnapshot on every change)
+  → api::router (axum, localhost:37888)  — GET /sessions, WS /events (session diffs
+    + {"TasksChanged": snapshot}), POST approve/reject/reply, /tasks CRUD,
+    PUT /sessions/:id/task, GET /search
   → React frontend (Zustand store + useSessionEngine() WS hook)
 ```
 
@@ -72,7 +75,7 @@ Four states: `Working` → `Done` → `Idle`, with `Waiting` as a side-branch. E
 
 Live session state is intentionally never persisted wholesale — `orchestrator::reconstruct_live_sessions()` rebuilds the board on startup from two durable sources instead:
 
-1. `memories` LanceDB rows (category, project, cwd, original prompt) — recency of the session's transcript file (`reconstruction_recency`, default 24h) gates whether a session gets resurrected at all.
+1. `memories` LanceDB rows (title, project, cwd, original prompt) — recency of the session's transcript file (`reconstruction_recency`, default 24h) gates whether a session gets resurrected at all.
 2. `EndedSessions` (`~/Library/Application Support/SessionBoard/ended-sessions.json`, same atomic-write flat-file pattern as `TailCheckpoints`) — the *only* durable record of which sessions actually reached `Done`. Without checking this, every restart would reconstruct every recent session as `Working`, silently erasing real `Done`/`Waiting` history (this was a real, shipped bug — see `reconstructs_an_ended_session_as_done_not_working` in `orchestrator.rs` for the regression test). An id is evicted from this file the moment any later hook fires for it (proof it's alive again, e.g. a resumed conversation) — otherwise the *next* restart would immediately force it back to `Done` even though the live engine had already correctly revived it.
 3. `WaitingSessions` (`waiting-sessions.json`, same pattern) — the only durable record of which sessions are genuinely blocked on the user (a `Notification` hook or the `AskUserQuestion` special case, see below). Reconstruction can fall back to a `Working` guess for anything else and let the next hook or the idle sweep correct it, but nothing re-fires `Notification` on its own just because the app restarted — without this file, a session that was legitimately `Waiting` when the app last restarted loses that status permanently (reconstructed as `Working`, then promptly swept to `Done` once `last_activity_ms` — also restored from the transcript's real mtime, not "now" — shows how stale it really is). Kept in sync from two places: `orchestrator::handle_hook_event` (any hook resolves or (re)marks the wait) and `api`'s approve/reject/reply handlers (`AppState::waiting_sessions`, shared with the orchestrator) — resolving a wait from the board has to update the same durable record a real hook would, or a restart shortly after would restore it as `Waiting` again.
 
@@ -87,13 +90,30 @@ There's no retry and no fallback: if the `session-start` handler in `orchestrato
 
 If a session still doesn't show up, check `~/.claude/projects/<sanitized-cwd>/<session_id>.jsonl` exists and has a real `"type":"user"` line — if it does, the fastest way to confirm/fix it live is replaying the real `session-start` hook by hand against the running engine's socket (`~/Library/Application Support/SessionBoard/engine.sock`), with `session_id`/`cwd`/`transcript_path` read straight off that transcript's own lines.
 
-### LanceDB: two tables, on purpose
+### LanceDB: one table
 
-`memory_repo.rs` wraps exactly two tables — `memories` (session text + embedding, doubles as both the categorization lookup and the search index) and `category_exemplars` (one row per known category, seeded from that category's first session). `MemoryRepo::open()` self-heals a stale on-disk schema (drops and recreates a table missing an expected column) rather than panicking — relevant if you add a column to `Memory` or `CategoryExemplar`.
+`memory_repo.rs` wraps one table — `memories` (session text + embedding + title, backing both reconstruction on restart and the semantic search index). It still carries a legacy `category` column from the swimlane-board era, written as `""` and never read, purely so existing on-disk history isn't wiped by the stale-schema recreate; an old `category_exemplars` table may exist on disk and is ignored. `MemoryRepo::open()` self-heals a stale on-disk schema (drops and recreates a table missing an expected column) rather than panicking — relevant if you add a column to `Memory`.
 
-### Categorization: embedding lookup first, LLM only when needed
+### Summary step (was "categorization")
 
-`categorize.rs`'s `categorize_session()` embeds the prompt (`nomic-embed-text`), checks cosine similarity against existing `category_exemplars`. Above the confidence threshold → joins that category, no generation call. Below it → calls the small instruct model (`qwen2.5:1.5b`) for a label, and — critically — the confidence threshold is enforced in *our* code, not just trusted from the model's own `is_new` flag in its JSON response.
+`summarize.rs`'s `summarize_session()` embeds the prompt (`nomic-embed-text`) for search and makes one `qwen2.5:1.5b` call for a stable session `title` + initial `task_summary`; an unparseable response falls back to the prompt's first words. There are no categories any more — grouping is the user's job, done with tasks.
+
+### Tasks (the Kanban board)
+
+`tasks.rs`: a `Task` is `{id, title, stage, created_at_ms}`; `TaskStore` also holds `assignments` (session id → task id; absent = unassigned, shown in the board's tray). Assignment is **always an explicit user action** (drag or ▾ menu) — never inferred. Project/tool on a task card are derived from its sessions, not stored. Durable in `tasks.json` (same atomic-write pattern as `EndedSessions`).
+
+**Rollup is backend-owned and edge-triggered** (`TaskStore::rollup`, driven by `tasks::run_rollup` on every engine diff): a task moves to `Done` at the moment all its live sessions *become* settled (`Done` or `Idle`), and back to `InProgress` when a settled `Done` task gets a live session again. Edge-triggering (not "all done ⇒ Done" on every diff) is deliberate: it stops a manual drag out of Done from bouncing straight back. After a restart the first observation of a task only records its state (reconstruction re-adds sessions gradually), except that a `Done` task found with a live session is pulled back to `InProgress`. A delete of a session drops its assignment; deleting a task orphans its sessions.
+
+### Frontend (Kanban) gotchas
+
+- **Drag state is published one tick after `dragstart`** (`boardActions.beginDrag`). Mutating the DOM inside the `dragstart` handler can make Chrome abort the drag; handlers read the synchronous `getDrag()` instead of the store copy, which only drives visuals.
+- **CSS modules localize `animation-name`**, so `breathe`/`waitGlow`/`overlayIn` are declared in each module that uses them — referencing the global keyframes from `animations.css` silently does nothing.
+- **`useFlip` measures natural rects** (cancelling in-flight FLIP animations first). Measuring mid-animation once made phantom "moves" that broke drops.
+- The tray is hidden with no orphans, but floats over the columns (no layout shift) while a session is being dragged so there's always a place to unassign to.
+
+### E2E harness
+
+`scripts/e2e-run.sh` (isolated `HOME` + short TTLs + fake Ollama, API on :37999), `scripts/e2e-seed.py` (replays real-shaped hook events and writes fixture transcripts), `scripts/e2e/e2e.mjs` (Playwright-driven suite, one story per user flow, screenshots in `docs/e2e/`). Needs a scratch Vite: `npx vite --port 1430 --mode e2e` with `VITE_API_PORT=37999` in `.env.e2e.local`. Run: `PW_PATH=…/playwright-core/index.mjs node scripts/e2e/e2e.mjs` (`ONLY=E05,E06` to filter).
 
 ### Frontend: two independent search surfaces, don't merge their state again
 

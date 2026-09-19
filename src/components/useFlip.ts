@@ -13,50 +13,59 @@ const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
  * animates the same way. Elements with no previous rect just appear.
  */
 export function useFlip(rootRef: RefObject<HTMLElement | null>): void {
+  // Natural (transform-free) rects from the previous layout, by `data-flip` key.
   const prev = useRef<Map<string, DOMRect>>(new Map());
 
-  const measure = () => {
-    const next = new Map<string, DOMRect>();
-    rootRef.current?.querySelectorAll<HTMLElement>("[data-flip]").forEach((el) => {
-      next.set(el.dataset.flip as string, el.getBoundingClientRect());
-    });
-    return next;
+  const flipEls = () => Array.from(rootRef.current?.querySelectorAll<HTMLElement>("[data-flip]") ?? []);
+
+  /** Natural position: any in-flight FLIP animation is cancelled first, so its
+   * transform can't leak into the rect (that would read as a phantom move). */
+  const naturalRect = (el: HTMLElement): { visual: DOMRect; natural: DOMRect; wasAnimating: boolean } => {
+    const visual = el.getBoundingClientRect();
+    const running = el.getAnimations().filter((a) => a.id === "flip");
+    running.forEach((a) => a.cancel());
+    return { visual, natural: running.length ? el.getBoundingClientRect() : visual, wasAnimating: running.length > 0 };
   };
 
   useLayoutEffect(() => {
     const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    const before = prev.current;
-    const root = rootRef.current;
-    if (root && !reduced && before.size > 0) {
-      root.querySelectorAll<HTMLElement>("[data-flip]").forEach((el) => {
-        const old = before.get(el.dataset.flip as string);
-        if (!old) return;
-        const now = el.getBoundingClientRect();
-        const dx = old.left - now.left;
-        const dy = old.top - now.top;
-        if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
-        el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "translate(0, 0)" }], {
-          duration: FLIP_MS,
-          easing: EASE,
-        });
+    const next = new Map<string, DOMRect>();
+    for (const el of flipEls()) {
+      const key = el.dataset.flip as string;
+      const { visual, natural, wasAnimating } = naturalRect(el);
+      next.set(key, natural);
+      if (reduced) continue;
+      // Continue smoothly from where an interrupted animation visibly was;
+      // otherwise start from the element's previous natural position.
+      const from = wasAnimating ? visual : prev.current.get(key);
+      if (!from) continue;
+      const dx = from.left - natural.left;
+      const dy = from.top - natural.top;
+      if (Math.abs(dx) < 2 && Math.abs(dy) < 2) continue;
+      el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "translate(0, 0)" }], {
+        id: "flip",
+        duration: FLIP_MS,
+        easing: EASE,
       });
     }
-    prev.current = measure();
+    prev.current = next;
   });
 
-  // Scrolling moves every rect without any React render; re-measure so the
-  // next render's diff isn't polluted by scroll offset.
+  // Scrolling or resizing moves every rect without any React render; re-measure
+  // so the next render's diff isn't polluted by the offset.
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
-    const onScroll = () => {
-      prev.current = measure();
+    const remeasure = () => {
+      const next = new Map<string, DOMRect>();
+      for (const el of flipEls()) next.set(el.dataset.flip as string, naturalRect(el).natural);
+      prev.current = next;
     };
-    root.addEventListener("scroll", onScroll, true);
-    window.addEventListener("resize", onScroll);
+    root.addEventListener("scroll", remeasure, true);
+    window.addEventListener("resize", remeasure);
     return () => {
-      root.removeEventListener("scroll", onScroll, true);
-      window.removeEventListener("resize", onScroll);
+      root.removeEventListener("scroll", remeasure, true);
+      window.removeEventListener("resize", remeasure);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

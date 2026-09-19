@@ -1,3 +1,8 @@
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.6); opacity: .5; }
+}
+
 .pill {
   display: inline-flex;
   align-items: center;

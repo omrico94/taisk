@@ -3,7 +3,7 @@ import { createTask } from "../api";
 import { useSessionStore } from "../store/sessionStore";
 import { WIP_LIMIT, sessionsOfTask } from "../store/selectors";
 import type { SessionView, Stage, Task } from "../types";
-import { moveTask } from "./boardActions";
+import { endDrag, getDrag, moveTask } from "./boardActions";
 import { TaskCard } from "./TaskCard";
 import styles from "./Kanban.module.css";
 
@@ -20,7 +20,6 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
   const drag = useSessionStore((s) => s.drag);
   const overCol = useSessionStore((s) => s.overCol);
   const setOver = useSessionStore((s) => s.setOver);
-  const clearDrag = useSessionStore((s) => s.clearDrag);
 
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState("");
@@ -61,8 +60,9 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
 
       <div
         className={`${styles.columnBody} ${hot ? styles.columnHot : ""}`}
+        data-testid={`column-body-${stage}`}
         onDragOver={(e) => {
-          if (drag.kind !== "task") return;
+          if (getDrag().kind !== "task") return;
           e.preventDefault();
           if (overCol !== stage) setOver({ col: stage });
         }}
@@ -70,44 +70,44 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
           if (!e.currentTarget.contains(e.relatedTarget as Node | null) && overCol === stage) setOver({ col: null });
         }}
         onDrop={(e) => {
-          if (drag.kind !== "task" || !drag.taskId) return;
+          const d = getDrag();
+          if (d.kind !== "task" || !d.taskId) return;
           e.preventDefault();
-          moveTask(drag.taskId, stage);
-          clearDrag();
+          moveTask(d.taskId, stage);
+          endDrag();
         }}
       >
         {tasks.map((t) => (
           <TaskCard key={t.id} task={t} sessions={sessionsOfTask(t.id, sessions, assignments)} />
         ))}
-      </div>
-
-      <div className={styles.columnFooter}>
-        {adding ? (
-          <div className={styles.addRow}>
-            <input
-              autoFocus
-              className={styles.addInput}
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") commit();
-                else if (e.key === "Escape") cancel();
-              }}
-              placeholder="Task title…"
-              aria-label="New task title"
-            />
-            <button className={styles.addCommit} onClick={commit}>
-              Add
+        <div className={styles.columnFooter}>
+          {adding ? (
+            <div className={styles.addRow}>
+              <input
+                autoFocus
+                className={styles.addInput}
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commit();
+                  else if (e.key === "Escape") cancel();
+                }}
+                placeholder="Task title…"
+                aria-label="New task title"
+              />
+              <button className={styles.addCommit} onClick={commit}>
+                Add
+              </button>
+              <button className={styles.addCancel} onClick={cancel}>
+                Esc
+              </button>
+            </div>
+          ) : (
+            <button className={styles.addButton} onClick={() => setAdding(true)}>
+              + Add task
             </button>
-            <button className={styles.addCancel} onClick={cancel}>
-              Esc
-            </button>
-          </div>
-        ) : (
-          <button className={styles.addButton} onClick={() => setAdding(true)}>
-            + Add task
-          </button>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );

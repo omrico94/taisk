@@ -1,8 +1,19 @@
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.6); opacity: .5; }
+}
+
+@keyframes waitGlow {
+  0%, 100% { box-shadow: 0 0 0 1px var(--w), 0 6px 26px -12px var(--w); }
+  50% { box-shadow: 0 0 0 1px var(--w), 0 12px 44px -6px var(--w); }
+}
+
 /* Kanban board (design view 1a). Values are the handoff's, verbatim. */
 
 .spacer { flex: 1; }
 
 .board {
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -82,7 +93,7 @@
   box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.55);
 }
 
-.columnFooter { flex: 0 0 auto; padding-top: 12px; }
+.columnFooter { flex: 0 0 auto; }
 .addButton {
   width: 100%;
   padding: 9px;
@@ -150,14 +161,29 @@
   padding: 2px 7px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
-.taskProject { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+.taskProject {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
 .needsPill {
-  font-size: 10px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 9px;
   font-weight: 700;
-  padding: 2px 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 8px;
   border-radius: var(--radius-pill);
   background: rgba(251, 191, 36, 0.14);
+  border: 1px solid rgba(251, 191, 36, 0.35);
   color: var(--state-waiting);
 }
 .taskTitle {
@@ -183,6 +209,9 @@
 .footerTokens { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary-alt); }
 .footerCost { font-family: var(--font-mono); font-size: 11px; color: var(--accent-cyan-light); }
 .noSessions { font-size: 11.5px; font-style: italic; color: var(--text-faint); }
+
+.taskDelete { opacity: 0; transition: opacity 0.15s; }
+.taskCard:hover .taskDelete { opacity: 1; }
 
 /* ---------- Session row ---------- */
 .sessionRow {
@@ -231,6 +260,17 @@
   border-bottom: 1px solid var(--border-06);
   transition: background 0.15s;
 }
+.trayFloating {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  padding-bottom: 14px;
+  background: #0d1018;
+  box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.85);
+}
+.trayFloating .trayHeader { margin-bottom: 0; }
 .trayHot { background: rgba(56, 189, 248, 0.07); box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.55); }
 .trayHeader { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .trayLabel { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
@@ -264,6 +304,7 @@
 
 /* ---------- Assign menu ---------- */
 .assignMenu {
+  box-sizing: border-box;
   position: fixed;
   z-index: 70;
   max-height: 220px;

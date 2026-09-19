@@ -37,12 +37,15 @@ export function Board() {
 
   // The tray is hidden when empty — except mid-drag of a session, so there's
   // always somewhere to drop it to unassign.
-  const showTray = orphans.length > 0 || drag.kind === "session";
+  // When there are no orphans it floats over the top of the columns instead of
+  // pushing them down, so nothing shifts under the cursor mid-drag.
+  const floatingTray = orphans.length === 0 && drag.kind === "session";
+  const showTray = orphans.length > 0 || floatingTray;
   const noResults = hasQuery && visibleTasks.length === 0 && orphans.length === 0;
 
   return (
     <div className={styles.board} ref={rootRef}>
-      {showTray && <UnassignedTray sessions={orphans} />}
+      {showTray && <UnassignedTray sessions={orphans} floating={floatingTray} />}
       {noResults && (
         <div className={styles.noResults}>
           <div>No tasks or sessions match &ldquo;{query}&rdquo;.</div>

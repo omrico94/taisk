@@ -20,12 +20,15 @@ use core_engine::API_PORT;
 #[tokio::main]
 async fn main() {
     let http_ollama = HttpOllamaClient::local();
-    let ollama: Arc<dyn OllamaClient> = if http_ollama.is_reachable().await {
+    // SESSIONBOARD_FAKE_OLLAMA=1 forces the deterministic fake even when a
+    // real Ollama is running (E2E runs want stable titles: first 4 prompt words).
+    let force_fake = std::env::var("SESSIONBOARD_FAKE_OLLAMA").is_ok();
+    let ollama: Arc<dyn OllamaClient> = if !force_fake && http_ollama.is_reachable().await {
         println!("dev_server: using real Ollama at 127.0.0.1:11434");
         Arc::new(http_ollama)
     } else {
         println!("dev_server: Ollama not reachable, using FakeOllamaClient (see plan §11)");
-        Arc::new(core_engine::ollama::fake::FakeOllamaClient::new("Uncategorized"))
+        Arc::new(core_engine::ollama::fake::FakeOllamaClient::new(""))
     };
 
     // Deliberately None: this is a throwaway test harness, not an install —
@@ -38,7 +41,9 @@ async fn main() {
         .await
         .expect("Core Engine bootstrap failed");
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", API_PORT)).await.expect("failed to bind API port");
-    println!("dev_server: serving on http://127.0.0.1:{API_PORT}");
+    // SESSIONBOARD_API_PORT lets an E2E run coexist with a real app instance on the default port.
+    let port: u16 = std::env::var("SESSIONBOARD_API_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(API_PORT);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.expect("failed to bind API port");
+    println!("dev_server: serving on http://127.0.0.1:{port}");
     axum::serve(listener, router(api_state)).await.expect("axum server failed");
 }

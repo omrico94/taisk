@@ -2,7 +2,7 @@ import { deleteSession } from "../api";
 import { fmtTokens } from "../styles/sessionStyle";
 import { useSessionStore } from "../store/sessionStore";
 import type { SessionView } from "../types";
-import { moveSession } from "./boardActions";
+import { beginDrag, endDrag, moveSession } from "./boardActions";
 import { SessionStateDot } from "./SessionStateDot";
 import styles from "./Kanban.module.css";
 
@@ -14,8 +14,6 @@ interface Props {
 /** A session inside a task card: draggable to another task or the tray. */
 export function SessionRow({ session, taskId }: Props) {
   const selectCard = useSessionStore((s) => s.selectCard);
-  const setDrag = useSessionStore((s) => s.setDrag);
-  const clearDrag = useSessionStore((s) => s.clearDrag);
 
   return (
     <div
@@ -30,9 +28,9 @@ export function SessionRow({ session, taskId }: Props) {
         e.stopPropagation();
         e.dataTransfer.setData("text/plain", session.id);
         e.dataTransfer.effectAllowed = "move";
-        setDrag({ kind: "session", taskId: null, sessId: session.id, srcTaskId: taskId });
+        beginDrag({ kind: "session", taskId: null, sessId: session.id, srcTaskId: taskId });
       }}
-      onDragEnd={clearDrag}
+      onDragEnd={endDrag}
       onClick={(e) => {
         e.stopPropagation();
         selectCard(session.id);
@@ -41,7 +39,7 @@ export function SessionRow({ session, taskId }: Props) {
       <SessionStateDot state={session.state} />
       <span className={styles.sessionTitle}>{session.title}</span>
       {session.subs.length > 0 && <span className={styles.subCount}>⤷{session.subs.length}</span>}
-      <span className={styles.tokenCount}>{fmtTokens(session.tokens)}</span>
+      {session.tokens > 0 && <span className={styles.tokenCount}>{fmtTokens(session.tokens)}</span>}
       <button
         className={`${styles.iconButton} ${styles.iconUnassign}`}
         title="Unassign (send to tray)"

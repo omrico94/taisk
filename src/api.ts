@@ -3,8 +3,11 @@ import type { SearchResult, SessionView, Stage, Task, TasksSnapshot } from "./ty
 // Matches src-tauri/src/lib.rs's API_PORT constant — the desktop app's own
 // Core Engine instance. A future Phase-3 VS Code extension would need real
 // port discovery (a port file); not needed yet for desktop-only Phase 1.
-const API_BASE = "http://127.0.0.1:37888";
-export const WS_URL = "ws://127.0.0.1:37888/events";
+// `VITE_API_PORT` only exists so an E2E run can point a scratch frontend at a
+// scratch backend next to a real app instance; unset, it's the fixed port.
+const API_PORT = import.meta.env.VITE_API_PORT ?? "37888";
+const API_BASE = `http://127.0.0.1:${API_PORT}`;
+export const WS_URL = `ws://127.0.0.1:${API_PORT}/events`;
 
 export interface TranscriptRow {
   role: string;
