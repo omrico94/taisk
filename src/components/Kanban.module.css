@@ -213,6 +213,10 @@
 .taskDelete { opacity: 0; transition: opacity 0.15s; }
 .taskCard:hover .taskDelete { opacity: 1; }
 
+.taskStart { opacity: 0; transition: opacity 0.15s; font-weight: 700; }
+.taskCard:hover .taskStart { opacity: 1; }
+.taskStart:hover { color: var(--accent-cyan-light); }
+
 /* ---------- Session row ---------- */
 .sessionRow {
   display: flex;

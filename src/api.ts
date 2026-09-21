@@ -86,3 +86,32 @@ export async function search(query: string): Promise<SearchResult[]> {
   const resp = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}`);
   return resp.json();
 }
+
+/** A pty is a real `claude` process kept alive by the backend (see terminal.rs). */
+export interface OpenedTerminal {
+  pty_id: string;
+  /** True when a running process for that session was reattached, not respawned. */
+  reused: boolean;
+}
+
+/** Reattaches to the running process for `sessionId`, else spawns `claude --resume`. */
+export async function openSessionTerminal(sessionId: string): Promise<OpenedTerminal> {
+  const resp = await fetch(`${API_BASE}/terminals/sessions/${encodeURIComponent(sessionId)}`, { method: "POST" });
+  if (!resp.ok) throw new Error(`Failed to open a terminal for session ${sessionId} (${resp.status})`);
+  return resp.json();
+}
+
+/** Always spawns a fresh `claude`; the new session is filed under `taskId` once it appears. */
+export async function openTaskTerminal(taskId: string, cwd: string | undefined): Promise<OpenedTerminal> {
+  const resp = await fetch(`${API_BASE}/terminals/tasks/${encodeURIComponent(taskId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd: cwd ?? null }),
+  });
+  if (!resp.ok) throw new Error(`Failed to start a session for task ${taskId} (${resp.status})`);
+  return resp.json();
+}
+
+export function terminalWsUrl(ptyId: string): string {
+  return `ws://127.0.0.1:${API_PORT}/terminals/${encodeURIComponent(ptyId)}/ws`;
+}

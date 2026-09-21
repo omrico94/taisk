@@ -24,6 +24,21 @@ export function TaskCard({ task, sessions }: Props) {
   const isDragging = drag.kind === "task" && drag.taskId === task.id;
   const sessionOver = drag.kind === "session" && overTaskId === task.id && drag.srcTaskId !== task.id;
 
+  // New session for this task, in the board's terminal pane: reuses the cwd
+  // of its most recently started session (the backend falls back to the
+  // user's home dir if none exist yet — `sessions` is oldest-first, see
+  // `sessionsOfTask`). The new `claude` process gets tagged with
+  // `SESSIONBOARD_TASK_ID` so the engine files it under this task the moment
+  // it appears on the board.
+  const startSession = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const cwd = sessions[sessions.length - 1]?.cwd;
+    useSessionStore
+      .getState()
+      .openTerminalForTask(task.id, cwd)
+      .catch((err) => console.error("Failed to start a new session:", err));
+  };
+
   const cls = [
     styles.taskCard,
     roll.needsYou ? styles.taskNeeds : roll.anyWorking ? styles.taskWorking : "",
@@ -73,6 +88,15 @@ export function TaskCard({ task, sessions }: Props) {
         {sessions.length > 0 && <span className={styles.taskProject}>{project}</span>}
         <span className={styles.spacer} />
         {roll.needsYou && <span className={styles.needsPill}>● Needs you</span>}
+        <button
+          className={`${styles.iconButton} ${styles.taskStart}`}
+          title="Start a new Claude Code session for this task"
+          aria-label="Start new session"
+          data-testid="start-task-session"
+          onClick={startSession}
+        >
+          +
+        </button>
         <button
           className={`${styles.iconButton} ${styles.iconDelete} ${styles.taskDelete}`}
           title="Delete task (its sessions return to the tray)"

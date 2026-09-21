@@ -26,6 +26,8 @@ use crate::memory_repo::MemoryRepo;
 use crate::ollama::OllamaClient;
 use crate::plan::read_session_plan;
 use crate::state::SessionEvent;
+use crate::tasks::TaskHub;
+use crate::terminal::TerminalManager;
 
 pub struct OrchestratorConfig {
     pub claude_projects_dir: PathBuf,
@@ -528,6 +530,8 @@ pub async fn run(
     orch_config: Arc<OrchestratorConfig>,
     waiting_sessions: Arc<Mutex<WaitingSessions>>,
     dismissed_sessions: Arc<Mutex<DismissedSessions>>,
+    tasks: TaskHub,
+    terminal: TerminalManager,
 ) {
     let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
     reconstruct_live_sessions(
@@ -553,6 +557,22 @@ pub async fn run(
     let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
 
     while let Some(event) = rx.recv().await {
+        // A session launched from a task card carries that task's id (see
+        // hook-bridge); file it there once it actually appears on the board.
+        if event.event == "session-start" {
+            let sid = event.payload.get("session_id").and_then(|v| v.as_str());
+            let tid = event.payload.get("sessionboard_task_id").and_then(|v| v.as_str());
+            if let (Some(sid), Some(tid)) = (sid, tid) {
+                tokio::spawn(assign_when_visible(engine.clone(), tasks.clone(), sid.to_string(), tid.to_string(), orch_config.transcript_wait));
+            }
+            // A terminal embedded in the board tagged this session's process
+            // too; in-memory bookkeeping only, so no need to wait for the
+            // session to surface on the board first.
+            let pid = event.payload.get("sessionboard_pty_id").and_then(|v| v.as_str());
+            if let (Some(sid), Some(pid)) = (sid, pid) {
+                terminal.link_session(pid, sid);
+            }
+        }
         let engine = engine.clone();
         let repo = repo.clone();
         let ollama = ollama.clone();
@@ -578,6 +598,20 @@ pub async fn run(
             )
             .await;
         });
+    }
+}
+
+/// `session-start` only surfaces a session once its first prompt lands in the
+/// transcript, so poll for it (bounded by the same wait) before assigning.
+async fn assign_when_visible(engine: EngineHandle, tasks: TaskHub, session_id: String, task_id: String, wait: Duration) {
+    let deadline = tokio::time::Instant::now() + wait + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        let sessions = engine.snapshot().await;
+        if sessions.iter().any(|s| s.id == session_id) {
+            tasks.assign(&session_id, Some(&task_id), &sessions).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }
 
@@ -1579,7 +1613,8 @@ mod tests {
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions));
+        let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new()));
         // Give the orchestrator a moment to bind the UDS before the fake
         // hook-bridge client below tries to connect to it.
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1633,6 +1668,171 @@ mod tests {
             .await
             .expect("should receive a Waiting diff before timing out");
         assert_eq!(waiting.state, crate::state::SessionState::Waiting);
+    }
+
+    /// "Start new session from a task": `start_task_session` (Tauri command)
+    /// sets `SESSIONBOARD_TASK_ID` on the launched `claude` process, which
+    /// `hook-bridge` stamps onto every hook payload as `sessionboard_task_id`
+    /// (see `hook-bridge/src/main.rs`). This drives the real `run()` loop
+    /// end to end through a real UDS and asserts the resulting session gets
+    /// auto-filed under that task the moment it appears on the board — the
+    /// same real-wiring style as `real_uds_hook_events_and_scratch_transcript_drive_the_real_orchestrator`.
+    #[tokio::test]
+    async fn session_start_tagged_with_a_task_id_is_auto_assigned_to_that_task() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let cwd = "/Users/omricohen/api-gateway";
+        let session_id = "orch-task-1";
+        let prompt_text = "Wire up the new billing webhook";
+
+        let path = transcript_path(claude_dir.path(), cwd, session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({"type":"user","message":{"role":"user","content":prompt_text}}).to_string() + "\n",
+        )
+        .unwrap();
+
+        let engine = EngineHandle::spawn();
+        let repo = Arc::new(MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap());
+        let ollama: Arc<dyn OllamaClient> = Arc::new(FakeOllamaClient::new_summarizing("Billing webhook"));
+        let cat_config = Arc::new(SummarizeConfig::default());
+        let socket_path = app_dir.path().join("engine.sock");
+        let orch_config = Arc::new(OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
+            socket_path: socket_path.clone(),
+            transcript_wait: Duration::from_millis(500),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            ..OrchestratorConfig::default()
+        });
+        let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+
+        let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
+        let task = tasks.create("Billing", crate::tasks::Stage::Todo).await.expect("task should be created");
+
+        tokio::spawn(run(
+            engine.clone(),
+            repo.clone(),
+            ollama,
+            cat_config,
+            orch_config,
+            waiting_sessions,
+            dismissed_sessions,
+            tasks.clone(),
+            TerminalManager::new(),
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let mut payload = real_session_start_payload(session_id, cwd, &path, "startup");
+        payload["sessionboard_task_id"] = serde_json::json!(task.id);
+        let envelope = serde_json::json!({ "event": "session-start", "payload": payload });
+        let socket_path_clone = socket_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut stream = StdUnixStream::connect(&socket_path_clone).unwrap();
+            stream.write_all(envelope.to_string().as_bytes()).unwrap();
+        })
+        .await
+        .unwrap();
+
+        // Assignment lands slightly after the card itself (it waits for the
+        // session to show up in a snapshot first) — poll instead of assuming
+        // a fixed delay is enough.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if tasks.snapshot().await.assignments.get(session_id) == Some(&task.id) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "session should have been assigned to its task in time");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A `claude` spawned in an embedded terminal carries its pty id (via
+    /// hook-bridge's `sessionboard_pty_id`); session-start must link that pty
+    /// to the real session id so a later jump reuses the running process.
+    #[tokio::test]
+    async fn session_start_tagged_with_a_pty_id_links_the_terminal() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let cwd = "/Users/omricohen/api-gateway";
+        let session_id = "orch-pty-1";
+        let path = transcript_path(claude_dir.path(), cwd, session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({"type":"user","message":{"role":"user","content":"hi"}}).to_string() + "\n",
+        )
+        .unwrap();
+
+        let engine = EngineHandle::spawn();
+        let repo = Arc::new(MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap());
+        let ollama: Arc<dyn OllamaClient> = Arc::new(FakeOllamaClient::new_summarizing("Hi"));
+        let cat_config = Arc::new(SummarizeConfig::default());
+        let socket_path = app_dir.path().join("engine.sock");
+        let orch_config = Arc::new(OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
+            socket_path: socket_path.clone(),
+            transcript_wait: Duration::from_millis(500),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            ..OrchestratorConfig::default()
+        });
+        let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+        let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
+
+        let terminal = TerminalManager::new();
+        let pty_id = terminal
+            .spawn(crate::terminal::SpawnSpec {
+                cwd: "/tmp".into(),
+                program: "/bin/sleep".into(),
+                args: vec!["30".into()],
+                env: vec![],
+                session_id: None,
+                task_id: None,
+            })
+            .unwrap();
+        assert_eq!(terminal.info(&pty_id).unwrap().session_id, None);
+
+        tokio::spawn(run(
+            engine.clone(),
+            repo.clone(),
+            ollama,
+            cat_config,
+            orch_config,
+            waiting_sessions,
+            dismissed_sessions,
+            tasks,
+            terminal.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let mut payload = real_session_start_payload(session_id, cwd, &path, "startup");
+        payload["sessionboard_pty_id"] = serde_json::json!(pty_id);
+        let envelope = serde_json::json!({ "event": "session-start", "payload": payload });
+        tokio::task::spawn_blocking(move || {
+            let mut stream = StdUnixStream::connect(&socket_path).unwrap();
+            stream.write_all(envelope.to_string().as_bytes()).unwrap();
+        })
+        .await
+        .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if terminal.info(&pty_id).unwrap().session_id.as_deref() == Some(session_id) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "pty should have been linked to its session");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(terminal.find_by_session_id(session_id), Some(pty_id));
+        terminal.kill_all();
     }
 
     /// Regression (user report — a real "best pet for you" AskUserQuestion
@@ -2122,7 +2322,8 @@ mod tests {
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions));
+        let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new()));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let missing_path = transcript_path(claude_dir.path(), "/Users/omricohen", session_id);
@@ -2242,7 +2443,8 @@ mod tests {
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions));
+        let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new()));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let refresh_prompt = format!(
@@ -2339,7 +2541,8 @@ mod tests {
         let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions));
+        let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new()));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let send = |event: &str| {

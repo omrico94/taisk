@@ -4,6 +4,7 @@ import { Board } from "./components/Board";
 import { SessionOverlay } from "./components/SessionOverlay";
 import { AssignMenu } from "./components/AssignMenu";
 import { AskMemoryOverlay } from "./components/AskMemoryOverlay";
+import { TerminalPanel } from "./components/TerminalPanel";
 import { useSessionStore } from "./store/sessionStore";
 import { useSessionEngine } from "./store/useSessionEngine";
 import styles from "./App.module.css";
@@ -46,6 +47,7 @@ function App() {
         <AssignMenu />
         <AskMemoryOverlay />
       </div>
+      <TerminalPanel />
     </div>
   );
 }

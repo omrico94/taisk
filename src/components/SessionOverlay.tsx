@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useSessionStore } from "../store/sessionStore";
 import type { SessionState } from "../types";
 import {
@@ -128,9 +127,12 @@ export function SessionOverlay({ nowMs }: Props) {
     selectCard(null);
   };
   const jumpToSession = () => {
-    invoke("jump_to_cli_session", { cwd: session.cwd, sessionId: session.id }).catch((err) =>
-      console.error("Failed to jump to session:", err),
-    );
+    useSessionStore
+      .getState()
+      .openTerminalForSession(session.id)
+      .catch((err) => console.error("Failed to open a terminal for the session:", err));
+    // The terminal pane becomes the focus; get the overlay out of the way.
+    selectCard(null);
   };
 
   return (

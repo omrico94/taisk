@@ -15,6 +15,7 @@ use crate::summarize::SummarizeConfig;
 use crate::engine::EngineHandle;
 use crate::memory_repo::MemoryRepo;
 use crate::ollama::OllamaClient;
+use crate::terminal::TerminalManager;
 use crate::orchestrator::{self, DismissedSessions, OrchestratorConfig, WaitingSessions};
 
 pub struct BootstrapOptions {
@@ -23,6 +24,8 @@ pub struct BootstrapOptions {
     /// throwaway dev-server run against a scratch `claude_projects_dir`
     /// where touching the user's real settings would be undesirable).
     pub hook_bridge_path: Option<String>,
+    /// Shared with the host so it can kill every embedded terminal on quit.
+    pub terminal: TerminalManager,
 }
 
 /// Never blocks on first-run readiness (Ollama reachable, models present) —
@@ -62,6 +65,8 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
         orch_config,
         waiting_sessions.clone(),
         dismissed_sessions.clone(),
+        tasks.clone(),
+        options.terminal.clone(),
     ));
 
     Ok(AppState {
@@ -73,5 +78,7 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
         waiting_sessions,
         dismissed_sessions,
         tasks,
+        terminal: options.terminal,
+        claude_bin: "claude".to_string(),
     })
 }

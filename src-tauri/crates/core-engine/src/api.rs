@@ -14,6 +14,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
@@ -25,6 +27,7 @@ use crate::memory_repo::{MemoryRepo, PurgeScope};
 use crate::ollama::OllamaClient;
 use crate::orchestrator::{DismissedSessions, WaitingSessions};
 use crate::tasks::{Stage, Task, TaskHub, TasksSnapshot};
+use crate::terminal::{PtyInfo, PtyOutput, SpawnSpec, TerminalManager};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -46,6 +49,12 @@ pub struct AppState {
     pub dismissed_sessions: Arc<Mutex<DismissedSessions>>,
     /// Kanban tasks + session→task assignments (see `tasks.rs`).
     pub tasks: TaskHub,
+    /// Embedded PTY-backed terminals (see `terminal.rs`). Shared with
+    /// `orchestrator::run`, which links a pending pty to its real session id.
+    pub terminal: TerminalManager,
+    /// Program spawned for a new/resumed session. `claude` in production;
+    /// tests substitute a harmless fixture.
+    pub claude_bin: String,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -60,6 +69,10 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/reply", post(reply))
         .route("/sessions/{id}/transcript", get(get_transcript))
         .route("/sessions/{id}", delete(delete_session))
+        .route("/terminals/sessions/{session_id}", post(open_session_terminal))
+        .route("/terminals/tasks/{task_id}", post(open_task_terminal))
+        .route("/terminals/{pty_id}", get(get_terminal_info))
+        .route("/terminals/{pty_id}/ws", get(ws_terminal))
         .route("/search", get(search))
         .route("/memories", delete(purge_memories))
         // Frontend (Tauri webview / Vite dev server) and this API are
@@ -103,6 +116,164 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
         if socket.send(Message::Text(text.into())).await.is_err() {
             break;
         }
+    }
+}
+
+#[derive(Serialize)]
+struct OpenedTerminal {
+    pty_id: String,
+    reused: bool,
+}
+
+/// "Jump into this session": reuses the running pty for it if there is one,
+/// otherwise spawns `claude --resume <id>` in the session's own cwd.
+async fn open_session_terminal(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<OpenedTerminal>, StatusCode> {
+    if let Some(pty_id) = state.terminal.find_by_session_id(&session_id) {
+        return Ok(Json(OpenedTerminal { pty_id, reused: true }));
+    }
+    let session = state
+        .engine
+        .snapshot()
+        .await
+        .into_iter()
+        .find(|s| s.id == session_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let pty_id = state
+        .terminal
+        .spawn(SpawnSpec {
+            cwd: usable_cwd(Some(session.cwd)),
+            program: state.claude_bin.clone(),
+            args: vec!["--resume".into(), session_id.clone()],
+            env: vec![],
+            session_id: Some(session_id),
+            task_id: None,
+        })
+        .map_err(|e| {
+            eprintln!("failed to spawn terminal: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(OpenedTerminal { pty_id, reused: false }))
+}
+
+#[derive(Deserialize, Default)]
+struct OpenTaskTerminalBody {
+    cwd: Option<String>,
+}
+
+/// "Start a new session from a task": always a fresh process. The task id
+/// rides along as `SESSIONBOARD_TASK_ID` so the engine files the new session
+/// under the task once its session-start hook fires (see hook-bridge).
+async fn open_task_terminal(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    body: Option<Json<OpenTaskTerminalBody>>,
+) -> Result<Json<OpenedTerminal>, StatusCode> {
+    if !state.tasks.snapshot().await.tasks.iter().any(|t| t.id == task_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let cwd = body.and_then(|Json(b)| b.cwd);
+    let pty_id = state
+        .terminal
+        .spawn(SpawnSpec {
+            cwd: usable_cwd(cwd),
+            program: state.claude_bin.clone(),
+            args: vec![],
+            env: vec![("SESSIONBOARD_TASK_ID".into(), task_id.clone())],
+            session_id: None,
+            task_id: Some(task_id),
+        })
+        .map_err(|e| {
+            eprintln!("failed to spawn terminal: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(OpenedTerminal { pty_id, reused: false }))
+}
+
+/// A directory that exists, else the user's home directory.
+fn usable_cwd(cwd: Option<String>) -> String {
+    cwd.filter(|c| std::path::Path::new(c).is_dir())
+        .or_else(|| dirs::home_dir().map(|h| h.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "/".to_string())
+}
+
+async fn get_terminal_info(State(state): State<AppState>, Path(pty_id): Path<String>) -> Result<Json<PtyInfo>, StatusCode> {
+    state.terminal.info(&pty_id).map(Json).ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn ws_terminal(ws: WebSocketUpgrade, Path(pty_id): Path<String>, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_terminal_ws(socket, pty_id, state))
+}
+
+async fn send_json(socket: &mut WebSocket, value: serde_json::Value) -> bool {
+    socket.send(Message::Text(value.to_string().into())).await.is_ok()
+}
+
+/// Bidirectional (unlike `handle_ws`, which only sends). Server → client:
+/// `scrollback` (replay of recent output, once, first), `data`, `linked`,
+/// `exited`. Client → server: `input` and `resize`. Payloads are base64
+/// since PTY output isn't guaranteed to be valid UTF-8.
+async fn handle_terminal_ws(mut socket: WebSocket, pty_id: String, state: AppState) {
+    let Some(sub) = state.terminal.subscribe(&pty_id) else {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    };
+    let mut rx = sub.rx;
+    if !send_json(&mut socket, serde_json::json!({"type": "scrollback", "data": B64.encode(&sub.scrollback)})).await {
+        return;
+    }
+    if let Some(sid) = &sub.session_id {
+        if !send_json(&mut socket, serde_json::json!({"type": "linked", "session_id": sid})).await {
+            return;
+        }
+    }
+    if let Some(code) = sub.exited {
+        let _ = send_json(&mut socket, serde_json::json!({"type": "exited", "code": code})).await;
+        return;
+    }
+    loop {
+        tokio::select! {
+            out = rx.recv() => match out {
+                Ok(PtyOutput::Data(bytes)) => {
+                    if !send_json(&mut socket, serde_json::json!({"type": "data", "data": B64.encode(&bytes)})).await { break; }
+                }
+                Ok(PtyOutput::Linked(sid)) => {
+                    if !send_json(&mut socket, serde_json::json!({"type": "linked", "session_id": sid})).await { break; }
+                }
+                Ok(PtyOutput::Exited(code)) => {
+                    let _ = send_json(&mut socket, serde_json::json!({"type": "exited", "code": code})).await;
+                    break;
+                }
+                // A slow viewer dropped some output; keep going with what's next.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            },
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Text(text))) => handle_terminal_client_frame(&state.terminal, &pty_id, &text).await,
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                _ => {}
+            },
+        }
+    }
+}
+
+async fn handle_terminal_client_frame(terminal: &TerminalManager, pty_id: &str, text: &str) {
+    let Ok(frame) = serde_json::from_str::<serde_json::Value>(text) else { return };
+    match frame.get("type").and_then(|v| v.as_str()) {
+        Some("input") => {
+            if let Some(bytes) = frame.get("data").and_then(|v| v.as_str()).and_then(|d| B64.decode(d).ok()) {
+                let _ = terminal.write(pty_id, &bytes).await;
+            }
+        }
+        Some("resize") => {
+            let dim = |k: &str| frame.get(k).and_then(|v| v.as_u64()).filter(|n| (1..=u16::MAX as u64).contains(n));
+            if let (Some(cols), Some(rows)) = (dim("cols"), dim("rows")) {
+                let _ = terminal.resize(pty_id, cols as u16, rows as u16).await;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -359,6 +530,9 @@ mod tests {
             waiting_sessions: Arc::new(Mutex::new(WaitingSessions::load(&waiting_sessions_path))),
             dismissed_sessions: Arc::new(Mutex::new(DismissedSessions::load(&dismissed_sessions_path))),
             tasks: TaskHub::load(&app_dir_path.join("tasks.json")),
+            terminal: TerminalManager::new(),
+            // `cat` echoes input back, which is all the terminal API tests need.
+            claude_bin: "/bin/cat".into(),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -506,6 +680,111 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["TasksChanged"]["tasks"][0]["title"], "A");
         assert_eq!(value["TasksChanged"]["tasks"][0]["stage"], "backlog");
+    }
+
+    async fn next_terminal_frame(ws: &mut (impl futures::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin)) -> serde_json::Value {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await.unwrap().unwrap().unwrap();
+        let WsMessage::Text(text) = msg else { panic!("expected text") };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn task_terminal_spawns_and_its_ws_replays_scrollback_then_echoes_input() {
+        use futures::SinkExt;
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+        let task = state.tasks.create("Billing", Stage::Todo).await.unwrap();
+
+        // Unknown task -> 404, no process spawned.
+        let resp = client.post(format!("{base}/terminals/tasks/nope")).send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+
+        let opened: serde_json::Value = client
+            .post(format!("{base}/terminals/tasks/{}", task.id))
+            .json(&serde_json::json!({"cwd": "/definitely/not/a/dir"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let pty_id = opened["pty_id"].as_str().unwrap().to_string();
+        assert_eq!(opened["reused"], false);
+
+        let info: serde_json::Value =
+            client.get(format!("{base}/terminals/{pty_id}")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(info["task_id"], task.id);
+        assert_eq!(info["alive"], true);
+
+        let ws_url = base.replace("http://", "ws://") + &format!("/terminals/{pty_id}/ws");
+        let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+        // Scrollback always comes first, even when empty.
+        assert_eq!(next_terminal_frame(&mut ws).await["type"], "scrollback");
+
+        let input = B64.encode(b"ping\n");
+        ws.send(WsMessage::Text(serde_json::json!({"type": "input", "data": input}).to_string().into()))
+            .await
+            .unwrap();
+        ws.send(WsMessage::Text(serde_json::json!({"type": "resize", "cols": 90, "rows": 20}).to_string().into()))
+            .await
+            .unwrap();
+        let mut seen = String::new();
+        while !seen.contains("ping") {
+            let frame = next_terminal_frame(&mut ws).await;
+            if frame["type"] == "data" {
+                seen.push_str(&String::from_utf8_lossy(&B64.decode(frame["data"].as_str().unwrap()).unwrap()));
+            }
+        }
+
+        // A second viewer (e.g. after switching away and back) replays what it missed.
+        let ws_url = base.replace("http://", "ws://") + &format!("/terminals/{pty_id}/ws");
+        let (mut ws2, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+        let replay = next_terminal_frame(&mut ws2).await;
+        assert_eq!(replay["type"], "scrollback");
+        let bytes = B64.decode(replay["data"].as_str().unwrap()).unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("ping"));
+        state.terminal.kill_all();
+    }
+
+    #[tokio::test]
+    async fn session_terminal_404s_for_an_unknown_session_and_reuses_a_linked_pty() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+        let resp = client.post(format!("{base}/terminals/sessions/ghost")).send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+
+        // A live pty already linked to a session is reused, not respawned.
+        let pty_id = state
+            .terminal
+            .spawn(SpawnSpec {
+                cwd: "/tmp".into(),
+                program: "/bin/cat".into(),
+                args: vec![],
+                env: vec![],
+                session_id: Some("s1".into()),
+                task_id: None,
+            })
+            .unwrap();
+        let opened: serde_json::Value = client
+            .post(format!("{base}/terminals/sessions/s1"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(opened["pty_id"], pty_id);
+        assert_eq!(opened["reused"], true);
+        state.terminal.kill_all();
+    }
+
+    #[tokio::test]
+    async fn ws_for_an_unknown_terminal_is_closed() {
+        let (base, _state) = spawn_test_server().await;
+        let ws_url = base.replace("http://", "ws://") + "/terminals/nope/ws";
+        let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next()).await.unwrap();
+        assert!(matches!(msg, Some(Ok(WsMessage::Close(_))) | None | Some(Err(_))));
     }
 
     #[tokio::test]

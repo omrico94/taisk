@@ -34,8 +34,26 @@ fn main() {
     // nothing, if the connect below also fails) — never worth aborting over.
     let _ = std::io::stdin().read_to_string(&mut stdin_raw);
 
-    let payload: serde_json::Value =
+    let mut payload: serde_json::Value =
         serde_json::from_str(&stdin_raw).unwrap_or(serde_json::Value::String(stdin_raw));
+
+    // Set by SessionBoard's "new session from a task" launcher; inherited
+    // from the `claude` process that spawned this hook. Lets the engine file
+    // the new session under that task deterministically.
+    if let (Some(obj), Ok(task_id)) = (payload.as_object_mut(), std::env::var("SESSIONBOARD_TASK_ID")) {
+        if !task_id.is_empty() {
+            obj.insert("sessionboard_task_id".into(), serde_json::Value::String(task_id));
+        }
+    }
+
+    // Same idea for terminals embedded in the board: the PTY manager sets
+    // this on the `claude` it spawns so the engine can link that pty to the
+    // real session id once session-start fires.
+    if let (Some(obj), Ok(pty_id)) = (payload.as_object_mut(), std::env::var("SESSIONBOARD_PTY_ID")) {
+        if !pty_id.is_empty() {
+            obj.insert("sessionboard_pty_id".into(), serde_json::Value::String(pty_id));
+        }
+    }
 
     let envelope = serde_json::json!({ "event": event, "payload": payload });
     let Ok(bytes) = serde_json::to_vec(&envelope) else {
