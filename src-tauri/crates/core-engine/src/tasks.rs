@@ -66,6 +66,9 @@ fn new_task_id() -> TaskId {
     format!("t{:x}{:x}", crate::now_ms(), NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
+/// A session counts as "settled" (no more work expected from it right now)
+/// when it is Done or Idle. Working and Waiting are both *unsettled*:
+/// Waiting means blocked on the user, so the task is not finished.
 fn is_settled(state: SessionState) -> bool {
     matches!(state, SessionState::Done | SessionState::Idle)
 }
@@ -158,9 +161,12 @@ impl TaskStore {
     /// *records* its state and never moves it, except that a `Done` task
     /// which turns out to have a live session is pulled back to `InProgress`.
     pub fn rollup(&mut self, sessions: &[SessionView]) -> bool {
+        // Index live sessions by id so member lookup below is O(1).
         let by_id: HashMap<&str, &SessionView> = sessions.iter().map(|s| (s.id.as_str(), s)).collect();
         let mut changed = false;
         for task in &mut self.data.tasks {
+            // Collect this task's member sessions: every assignment pointing
+            // at the task whose session is currently live on the board.
             let members: Vec<&SessionView> = self
                 .data
                 .assignments
@@ -168,23 +174,41 @@ impl TaskStore {
                 .filter(|(_, tid)| **tid == task.id)
                 .filter_map(|(sid, _)| by_id.get(sid.as_str()).copied())
                 .collect();
+            // No live members -> no signal. Forget the cached state so the
+            // next observation is treated as a first look, and leave the
+            // task's stage exactly where the user (or last rollup) put it.
             if members.is_empty() {
                 self.settled.remove(&task.id);
                 continue;
             }
+            // The task is "settled" only when *every* member session is.
+            // One still-working (or waiting) session keeps it unsettled.
             let settled = members.iter().all(|s| is_settled(s.state));
+            // Remember this observation and get back the previous one; the
+            // stage only moves on a *change* (edge), never on a steady state.
+            // That way a user who manually drags a task to another column
+            // isn't overridden on every diff while sessions stay unchanged.
             let prev = self.settled.insert(task.id.clone(), settled);
             let target = match prev {
+                // Edge: the settled status flipped since the last look.
                 Some(p) if p != settled => {
                     if settled && task.stage != Stage::Done {
+                        // Working -> all settled: auto-move In Progress -> Done.
                         Some(Stage::Done)
                     } else if !settled && task.stage == Stage::Done {
+                        // A session woke back up: pull Done back to In Progress.
                         Some(Stage::InProgress)
                     } else {
                         None
                     }
                 }
+                // First observation (e.g. right after a restart): never
+                // auto-complete, since sessions are re-added gradually and
+                // "all settled" may just mean "not all loaded yet". Only
+                // correct the one clearly wrong case: a Done task with a
+                // live, unsettled session.
                 None if !settled && task.stage == Stage::Done => Some(Stage::InProgress),
+                // Steady state: leave the stage alone.
                 _ => None,
             };
             if let Some(stage) = target {
@@ -296,6 +320,9 @@ pub async fn run_rollup(hub: TaskHub, engine: EngineHandle) {
     let mut rx = engine.subscribe();
     loop {
         match rx.recv().await {
+            // The diff's contents are ignored on purpose: we re-read a full
+            // snapshot instead. A lagged receiver (missed diffs) is handled
+            // the same way, since the snapshot is the source of truth.
             Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
                 let sessions = engine.snapshot().await;
                 hub.rollup(&sessions).await;

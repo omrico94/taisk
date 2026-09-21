@@ -23,10 +23,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Claude Code's own sanitization of a session's cwd into its project
-/// directory name: every `/` becomes `-`. Confirmed locally: cwd
-/// `/Users/omricohen/Desktop` -> `-Users-omricohen-Desktop`.
+/// directory name: every non-alphanumeric character becomes `-` (not just
+/// `/` — a `.` too, e.g. a `.claude/worktrees/...` cwd). Confirmed locally:
+/// `/Users/omricohen/Desktop` -> `-Users-omricohen-Desktop`, and
+/// `/Users/x/.claude/worktrees/foo` -> `-Users-x--claude-worktrees-foo`.
+/// Getting this wrong makes `transcript_path` miss the file, so a session
+/// is silently dropped on reconstruction after a restart.
 pub fn sanitize_cwd(cwd: &str) -> String {
-    cwd.replace('/', "-")
+    cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 pub fn transcript_path(claude_projects_dir: &Path, cwd: &str, session_id: &str) -> PathBuf {
@@ -512,6 +516,14 @@ mod tests {
         assert_eq!(
             p,
             Path::new("/Users/omricohen/.claude/projects/-Users-omricohen-Desktop/abc-123.jsonl")
+        );
+    }
+
+    #[test]
+    fn sanitize_cwd_also_replaces_dots_like_claude_code_does() {
+        assert_eq!(
+            sanitize_cwd("/Users/omricohen/Desktop/sessionboard/.claude/worktrees/multi-account-session-board-9b7dfd"),
+            "-Users-omricohen-Desktop-sessionboard--claude-worktrees-multi-account-session-board-9b7dfd"
         );
     }
 
