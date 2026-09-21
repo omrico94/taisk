@@ -37,7 +37,7 @@ async fn main() {
     // which resolves incorrectly for an example binary and wrote a broken
     // entry into the real file — drive hook events directly at the UDS in
     // tests/manual verification instead, as the orchestrator test does.)
-    let api_state = bootstrap::start(ollama, BootstrapOptions { hook_bridge_path: None })
+    let api_state = bootstrap::start(ollama, BootstrapOptions { hook_bridge_path: None, terminal: core_engine::terminal::TerminalManager::new() })
         .await
         .expect("Core Engine bootstrap failed");
 

@@ -16,6 +16,7 @@ pub mod settings_merge;
 pub mod state;
 pub mod summarize;
 pub mod tasks;
+pub mod terminal;
 
 pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};

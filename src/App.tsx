@@ -6,6 +6,7 @@ import { AssignMenu } from "./components/AssignMenu";
 import { AskMemoryOverlay } from "./components/AskMemoryOverlay";
 import { BoardTabs } from "./components/BoardTabs";
 import { BoardDialog } from "./components/BoardDialog";
+import { TerminalPanel } from "./components/TerminalPanel";
 import { useSessionStore } from "./store/sessionStore";
 import { useSessionEngine } from "./store/useSessionEngine";
 import styles from "./App.module.css";
@@ -51,6 +52,7 @@ function App() {
         <AskMemoryOverlay />
         <BoardDialog />
       </div>
+      <TerminalPanel />
     </div>
   );
 }

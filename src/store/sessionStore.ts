@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
+import { openSessionTerminal, openTaskTerminal } from "../api";
 import { DEFAULT_BOARD_ID, type Board, type SearchResult, type SessionView, type Task, type TasksSnapshot } from "../types";
 
 const ACTIVE_BOARD_KEY = "sessionboard.activeBoard";
@@ -32,6 +33,35 @@ export interface DragState {
 
 export const NO_DRAG: DragState = { kind: null, taskId: null, sessId: null, srcTaskId: null };
 
+/** The one terminal pane the board shows. The process behind it lives in the
+ * backend, so detaching/collapsing/switching never interrupts a session. */
+export interface TerminalState {
+  ptyId: string | null;
+  /** Null while a session started from a task hasn't reported its real id yet. */
+  sessionId: string | null;
+  /** Set only for that pending case, to label the pane until `sessionId` resolves. */
+  taskId: string | null;
+  collapsed: boolean;
+  alive: boolean;
+}
+
+export const DEFAULT_TERMINAL_HEIGHT = 320;
+export const MIN_TERMINAL_HEIGHT = 120;
+const HEIGHT_KEY = "sessionboard.terminalHeight";
+
+/** Pane height in px, remembered across launches (storage can be unavailable — never fatal). */
+function loadTerminalHeight(): number {
+  try {
+    const n = Number(localStorage.getItem(HEIGHT_KEY));
+    if (Number.isFinite(n) && n >= MIN_TERMINAL_HEIGHT) return n;
+  } catch {
+    /* fall through */
+  }
+  return DEFAULT_TERMINAL_HEIGHT;
+}
+
+export const NO_TERMINAL: TerminalState = { ptyId: null, sessionId: null, taskId: null, collapsed: false, alive: true };
+
 interface SessionStoreState {
   sessions: Record<string, SessionView>;
   tasks: Task[];
@@ -59,6 +89,9 @@ interface SessionStoreState {
   boards: Board[];
   activeBoardId: string;
   boardDialogOpen: boolean;
+  terminal: TerminalState;
+  /** Height of the terminal pane's body, in px (user-resizable). */
+  terminalHeight: number;
 
   setBoards: (boards: Board[]) => void;
   upsertBoard: (board: Board) => void;
@@ -84,6 +117,16 @@ interface SessionStoreState {
   clearDrag: () => void;
   openAssignMenu: (m: { sessionId: string; x: number; y: number } | null) => void;
   toggleHideIdle: () => void;
+  /** Attaches the pane to `sessionId`'s process (spawning `claude --resume` if none is running). */
+  openTerminalForSession: (sessionId: string) => Promise<void>;
+  /** Spawns a new `claude` for the task and attaches the pane to it. */
+  openTerminalForTask: (taskId: string, cwd: string | undefined) => Promise<void>;
+  closeTerminal: () => void;
+  toggleTerminalCollapsed: () => void;
+  /** A pending task-spawned terminal learned its real session id. */
+  resolveTerminalSession: (sessionId: string) => void;
+  setTerminalAlive: (alive: boolean) => void;
+  setTerminalHeight: (px: number) => void;
 }
 
 export const useSessionStore = create<SessionStoreState>((set) => ({
@@ -132,6 +175,8 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
     set({ activeBoardId: id, selectedId: null, assignMenu: null, query: "" });
   },
   setBoardDialogOpen: (boardDialogOpen) => set({ boardDialogOpen }),
+  terminal: NO_TERMINAL,
+  terminalHeight: loadTerminalHeight(),
 
   setSessions: (sessions) => set({ sessions: Object.fromEntries(sessions.map((s) => [s.id, s])) }),
   upsertSession: (s) => set((state) => ({ sessions: { ...state.sessions, [s.id]: s } })),
@@ -166,6 +211,31 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   clearDrag: () => set({ drag: NO_DRAG, overCol: null, overTaskId: null, overTray: false }),
   openAssignMenu: (assignMenu) => set({ assignMenu }),
   toggleHideIdle: () => set((state) => ({ hideIdle: !state.hideIdle })),
+  openTerminalForSession: async (sessionId) => {
+    const { pty_id } = await openSessionTerminal(sessionId);
+    set((state) =>
+      state.terminal.ptyId === pty_id
+        ? { terminal: { ...state.terminal, collapsed: false } }
+        : { terminal: { ptyId: pty_id, sessionId, taskId: null, collapsed: false, alive: true } },
+    );
+  },
+  openTerminalForTask: async (taskId, cwd) => {
+    const { pty_id } = await openTaskTerminal(taskId, cwd);
+    set({ terminal: { ptyId: pty_id, sessionId: null, taskId, collapsed: false, alive: true } });
+  },
+  closeTerminal: () => set({ terminal: NO_TERMINAL }),
+  toggleTerminalCollapsed: () => set((state) => ({ terminal: { ...state.terminal, collapsed: !state.terminal.collapsed } })),
+  resolveTerminalSession: (sessionId) => set((state) => ({ terminal: { ...state.terminal, sessionId } })),
+  setTerminalAlive: (alive) => set((state) => ({ terminal: { ...state.terminal, alive } })),
+  setTerminalHeight: (px) => {
+    const terminalHeight = Math.max(MIN_TERMINAL_HEIGHT, Math.round(px));
+    try {
+      localStorage.setItem(HEIGHT_KEY, String(terminalHeight));
+    } catch {
+      /* not persisted — still applies for this run */
+    }
+    set({ terminalHeight });
+  },
 }));
 
 /** Live sessions on the board being viewed. `useShallow` keeps the derived
