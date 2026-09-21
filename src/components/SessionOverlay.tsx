@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSessionStore } from "../store/sessionStore";
-import type { SessionState } from "../types";
+import { DEFAULT_BOARD_ID, type SessionState } from "../types";
 import {
   approveSession,
   deleteSession,
@@ -40,6 +40,9 @@ export function SessionOverlay({ nowMs }: Props) {
   const selectCard = useSessionStore((s) => s.selectCard);
   const replyText = useSessionStore((s) => s.replyText);
   const setReplyText = useSessionStore((s) => s.setReplyText);
+  // Non-default boards live in their own Claude config dir, so `--resume`
+  // only finds the session if Terminal is launched with that same dir.
+  const boardConfigDir = useSessionStore((s) => s.boards.find((b) => b.id === session?.board)?.config_dir);
   const taskTitle = useSessionStore((s) => {
     const tid = s.selectedId ? s.assignments[s.selectedId] : undefined;
     return s.tasks.find((t) => t.id === tid)?.title ?? null;
@@ -128,9 +131,11 @@ export function SessionOverlay({ nowMs }: Props) {
     selectCard(null);
   };
   const jumpToSession = () => {
-    invoke("jump_to_cli_session", { cwd: session.cwd, sessionId: session.id }).catch((err) =>
-      console.error("Failed to jump to session:", err),
-    );
+    invoke("jump_to_cli_session", {
+      cwd: session.cwd,
+      sessionId: session.id,
+      configDir: session.board === DEFAULT_BOARD_ID ? null : (boardConfigDir ?? null),
+    }).catch((err) => console.error("Failed to jump to session:", err));
   };
 
   return (

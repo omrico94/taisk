@@ -29,6 +29,7 @@ export function AskMemoryOverlay() {
   const askResults = useSessionStore((s) => s.askResults);
   const setAskResults = useSessionStore((s) => s.setAskResults);
   const selectCard = useSessionStore((s) => s.selectCard);
+  const activeBoardId = useSessionStore((s) => s.activeBoardId);
 
   // M10: real GET /search, debounced since — unlike M8's instant client-side
   // mock — this is a genuine network round trip (embeds the query, queries
@@ -37,7 +38,7 @@ export function AskMemoryOverlay() {
     if (!askOpen) return;
     let cancelled = false;
     const id = setTimeout(() => {
-      search(query)
+      search(query, activeBoardId)
         .then((results) => {
           if (!cancelled) setAskResults(results);
         })
@@ -47,7 +48,7 @@ export function AskMemoryOverlay() {
       cancelled = true;
       clearTimeout(id);
     };
-  }, [askOpen, query, setAskResults]);
+  }, [askOpen, query, activeBoardId, setAskResults]);
 
   return (
     <AnimatePresence>

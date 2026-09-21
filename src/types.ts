@@ -10,6 +10,8 @@ export interface SessionView {
   project: string;
   cwd: string;
   entrypoint: string;
+  /** Board (Claude config directory / account) this session belongs to. */
+  board: string;
   state: SessionState;
   /** Short, stable session name — set once at summary time. */
   title: string;
@@ -58,6 +60,8 @@ export interface Task {
   title: string;
   stage: Stage;
   created_at_ms: number;
+  /** Board this task lives on. */
+  board: string;
 }
 
 /** session id → task id. A session absent from the map is unassigned. */
@@ -79,3 +83,12 @@ export interface SearchResult {
   live: boolean;
   created_at: number;
 }
+
+/** A named board tied to one Claude config directory (one Claude account). */
+export interface Board {
+  id: string;
+  name: string;
+  config_dir: string;
+}
+
+export const DEFAULT_BOARD_ID = "default";

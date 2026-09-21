@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import { useSessionStore } from "../store/sessionStore";
+import { useBoardSessions, useBoardTasks, useSessionStore } from "../store/sessionStore";
 import { taskMeta, sessionsOfTask } from "../store/selectors";
 import { moveSession } from "./boardActions";
 import styles from "./Kanban.module.css";
@@ -14,8 +14,8 @@ const MENU_W = 210;
 export function AssignMenu() {
   const menu = useSessionStore((s) => s.assignMenu);
   const open = useSessionStore((s) => s.openAssignMenu);
-  const tasks = useSessionStore(useShallow((s) => s.tasks));
-  const sessions = useSessionStore(useShallow((s) => Object.values(s.sessions)));
+  const tasks = useBoardTasks();
+  const sessions = useBoardSessions();
   const assignments = useSessionStore(useShallow((s) => s.assignments));
 
   useEffect(() => {

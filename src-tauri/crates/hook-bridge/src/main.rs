@@ -27,15 +27,25 @@ fn socket_path() -> PathBuf {
 }
 
 fn main() {
-    let event = std::env::args().nth(1).unwrap_or_default();
+    let args: Vec<String> = std::env::args().collect();
+    let event = args.get(1).cloned().unwrap_or_default();
+    // `--board <id>` is written into non-default boards' settings.json by
+    // SessionBoard, so events say which Claude config directory (account)
+    // they came from. Absent means the default board (`~/.claude`).
+    let board = args.iter().position(|a| a == "--board").and_then(|i| args.get(i + 1)).cloned();
 
     let mut stdin_raw = String::new();
     // A read failure here just means an empty payload gets forwarded (or
     // nothing, if the connect below also fails) — never worth aborting over.
     let _ = std::io::stdin().read_to_string(&mut stdin_raw);
 
-    let payload: serde_json::Value =
+    let mut payload: serde_json::Value =
         serde_json::from_str(&stdin_raw).unwrap_or(serde_json::Value::String(stdin_raw));
+    // Carried inside the payload object (not as a new envelope field) so the
+    // engine's `HookEvent` shape is unchanged for older bridges/tests.
+    if let (Some(board), Some(obj)) = (board, payload.as_object_mut()) {
+        obj.insert("_sessionboard_board".to_string(), serde_json::Value::String(board));
+    }
 
     let envelope = serde_json::json!({ "event": event, "payload": payload });
     let Ok(bytes) = serde_json::to_vec(&envelope) else {

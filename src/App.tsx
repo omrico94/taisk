@@ -4,6 +4,8 @@ import { Board } from "./components/Board";
 import { SessionOverlay } from "./components/SessionOverlay";
 import { AssignMenu } from "./components/AssignMenu";
 import { AskMemoryOverlay } from "./components/AskMemoryOverlay";
+import { BoardTabs } from "./components/BoardTabs";
+import { BoardDialog } from "./components/BoardDialog";
 import { useSessionStore } from "./store/sessionStore";
 import { useSessionEngine } from "./store/useSessionEngine";
 import styles from "./App.module.css";
@@ -29,6 +31,7 @@ function App() {
         setAskOpen(!askOpen);
       } else if (key === "escape") {
         setAskOpen(false);
+        useSessionStore.getState().setBoardDialogOpen(false);
         selectCard(null);
         useSessionStore.getState().openAssignMenu(null);
       }
@@ -40,11 +43,13 @@ function App() {
   return (
     <div className={styles.app}>
       <Toolbar />
+      <BoardTabs />
       <div className={styles.body}>
         <Board />
         <SessionOverlay nowMs={nowMs} />
         <AssignMenu />
         <AskMemoryOverlay />
+        <BoardDialog />
       </div>
     </div>
   );

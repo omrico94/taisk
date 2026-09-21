@@ -33,7 +33,7 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
   };
   const commit = () => {
     const t = title.trim();
-    if (t) createTask(t, stage).catch((err) => console.error("Failed to create task:", err));
+    if (t) createTask(t, stage, useSessionStore.getState().activeBoardId).catch((err) => console.error("Failed to create task:", err));
     cancel(); // empty submissions are discarded
   };
 

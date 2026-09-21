@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 
+use crate::boards::{Board, BoardStore, DEFAULT_BOARD_ID};
 use crate::summarize::SummarizeConfig;
 use crate::collector::{parse_transcript_for_display, transcript_path, TranscriptRow};
 use crate::engine::{EngineCommand, EngineHandle, SessionView};
@@ -33,6 +34,12 @@ pub struct AppState {
     pub ollama: Arc<dyn OllamaClient>,
     pub config: Arc<SummarizeConfig>,
     pub claude_projects_dir: PathBuf,
+    /// Shared with the orchestrator: boards and their session assignments.
+    pub boards: Arc<BoardStore>,
+    /// Path of the `hook-bridge` binary, used to (un)register hooks in a
+    /// board's config directory. `None` (dev server, tests) means boards can
+    /// be managed but their settings.json is never touched.
+    pub hook_bridge_path: Option<String>,
     /// Shared with `orchestrator::run` — approve/reject/reply from the board
     /// resolve a `Waiting` session the same way a real hook would, so they
     /// must evict it from the same durable record reconstruction reads on
@@ -52,6 +59,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/sessions", get(get_sessions))
         .route("/events", get(ws_events))
+        .route("/boards", get(list_boards).post(create_board))
+        .route("/boards/{id}", patch(update_board).delete(delete_board))
         .route("/tasks", get(get_tasks).post(create_task))
         .route("/tasks/{id}", patch(update_task).delete(delete_task))
         .route("/sessions/{id}/task", put(assign_session))
@@ -114,10 +123,85 @@ async fn get_tasks(State(state): State<AppState>) -> Json<TasksSnapshot> {
 struct CreateTaskBody {
     title: String,
     stage: Stage,
+    /// Board the task belongs to; omitted means the default board.
+    board: Option<String>,
 }
 
 async fn create_task(State(state): State<AppState>, Json(body): Json<CreateTaskBody>) -> Result<Json<Task>, StatusCode> {
-    state.tasks.create(&body.title, body.stage).await.map(Json).ok_or(StatusCode::BAD_REQUEST)
+    let board = body.board.as_deref().unwrap_or(DEFAULT_BOARD_ID);
+    if state.boards.get(board).is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    state.tasks.create_on_board(&body.title, body.stage, board).await.map(Json).ok_or(StatusCode::BAD_REQUEST)
+}
+
+#[derive(Serialize)]
+struct ApiError {
+    error: String,
+}
+
+fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    (status, Json(ApiError { error: message.into() }))
+}
+
+async fn list_boards(State(state): State<AppState>) -> Json<Vec<Board>> {
+    Json(state.boards.list())
+}
+
+#[derive(Deserialize)]
+struct CreateBoardBody {
+    name: String,
+    config_dir: String,
+}
+
+/// Adds a board and installs our hooks into its config directory (created if
+/// it doesn't exist yet, so the user can log in there afterwards). If the hook
+/// install fails the board is rolled back, so a listed board always works.
+async fn create_board(
+    State(state): State<AppState>,
+    Json(body): Json<CreateBoardBody>,
+) -> Result<Json<Board>, (StatusCode, Json<ApiError>)> {
+    let board = state.boards.add(&body.name, &body.config_dir).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
+    if let Some(bridge) = &state.hook_bridge_path {
+        if let Err(e) = crate::first_run::register_board_hooks(bridge, &board) {
+            let _ = state.boards.remove(&board.id);
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("couldn't write hooks into {}: {e}", board.config_dir.display()),
+            ));
+        }
+    }
+    Ok(Json(board))
+}
+
+#[derive(Deserialize)]
+struct UpdateBoardBody {
+    name: String,
+}
+
+async fn update_board(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateBoardBody>,
+) -> Result<Json<Board>, (StatusCode, Json<ApiError>)> {
+    state.boards.rename(&id, &body.name).map(Json).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))
+}
+
+/// Removes a board: takes its live cards and its tasks off SessionBoard and
+/// strips our hooks from its config directory. Never touches the directory's
+/// other contents or any transcripts.
+async fn delete_board(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    let board = state.boards.remove(&id).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
+    state.tasks.delete_board(&id).await;
+    for session in state.engine.snapshot().await.into_iter().filter(|s| s.board == id) {
+        unmark_waiting(&state, &session.id).await;
+        state.tasks.forget_session(&session.id).await;
+        state.engine.dispatch(EngineCommand::RemoveSession { id: session.id }).await;
+    }
+    if let Some(bridge) = &state.hook_bridge_path {
+        let _ = crate::first_run::unregister_board_hooks(bridge, &board);
+    }
+    Ok(StatusCode::OK)
 }
 
 #[derive(Deserialize)]
@@ -245,13 +329,19 @@ async fn get_transcript(State(state): State<AppState>, Path(id): Path<String>) -
     let Some(session) = sessions.into_iter().find(|s| s.id == id) else {
         return Json(vec![]);
     };
-    let path = transcript_path(&state.claude_projects_dir, &session.cwd, &session.id);
+    let projects_dir = match state.boards.get(&session.board) {
+        Some(b) if b.id != DEFAULT_BOARD_ID => b.config_dir.join("projects"),
+        _ => state.claude_projects_dir.clone(),
+    };
+    let path = transcript_path(&projects_dir, &session.cwd, &session.id);
     Json(parse_transcript_for_display(&path))
 }
 
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
+    /// Restrict results to one board. Omitted searches every board.
+    board: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -287,10 +377,15 @@ async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> 
         return Json(vec![]);
     };
     let live_ids: HashSet<String> = state.engine.snapshot().await.into_iter().map(|s| s.id).collect();
-    let results = state.repo.search(&embedding, 10).await.unwrap_or_default();
+    // Over-fetch when filtering by board so a board with few matches isn't
+    // starved by other boards' rows in the global top-N.
+    let fetch = if q.board.is_some() { 50 } else { 10 };
+    let results = state.repo.search(&embedding, fetch).await.unwrap_or_default();
     Json(
         results
             .into_iter()
+            .filter(|r| q.board.as_deref().is_none_or(|b| state.boards.board_of(&r.memory.session_id) == b))
+            .take(10)
             .map(|r| SearchResult {
                 live: live_ids.contains(&r.memory.session_id),
                 text: r.memory.text,
@@ -356,6 +451,8 @@ mod tests {
             ollama: Arc::new(FakeOllamaClient::new("Backend / API")),
             config: Arc::new(SummarizeConfig::default()),
             claude_projects_dir,
+            boards: Arc::new(BoardStore::in_memory()),
+            hook_bridge_path: None,
             waiting_sessions: Arc::new(Mutex::new(WaitingSessions::load(&waiting_sessions_path))),
             dismissed_sessions: Arc::new(Mutex::new(DismissedSessions::load(&dismissed_sessions_path))),
             tasks: TaskHub::load(&app_dir_path.join("tasks.json")),
@@ -756,5 +853,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows, vec![TranscriptRow { role: "You".into(), text: "refactor auth".into() }]);
+    }
+
+    #[tokio::test]
+    async fn boards_scope_tasks_and_removing_one_clears_its_cards() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        let boards: Vec<Board> = client.get(format!("{base}/boards")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(boards.len(), 1);
+        assert_eq!(boards[0].id, DEFAULT_BOARD_ID);
+
+        let created = client
+            .post(format!("{base}/boards"))
+            .json(&serde_json::json!({"name": "Work", "config_dir": "/tmp/sessionboard-test-work"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), 200);
+        let work: Board = created.json().await.unwrap();
+        assert_eq!(work.id, "work");
+
+        let dup = client
+            .post(format!("{base}/boards"))
+            .json(&serde_json::json!({"name": "Work", "config_dir": "/tmp/elsewhere"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(dup.status(), 400);
+        let body: serde_json::Value = dup.json().await.unwrap();
+        assert!(body["error"].as_str().unwrap().contains("already exists"));
+
+        // Tasks belong to a board (default when omitted); unknown board is rejected.
+        let on_work: Task = client
+            .post(format!("{base}/tasks"))
+            .json(&serde_json::json!({"title": "Billing", "stage": "todo", "board": "work"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let on_default: Task = client
+            .post(format!("{base}/tasks"))
+            .json(&serde_json::json!({"title": "Ops", "stage": "todo"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(on_work.board, "work");
+        assert_eq!(on_default.board, DEFAULT_BOARD_ID);
+        let bad = client
+            .post(format!("{base}/tasks"))
+            .json(&serde_json::json!({"title": "X", "stage": "todo", "board": "ghost"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), 400);
+
+        let renamed: Board = client
+            .patch(format!("{base}/boards/work"))
+            .json(&serde_json::json!({"name": "Job"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(renamed.name, "Job");
+
+        // A live card on the work board, assigned to its task, goes away with
+        // the board — along with the task. Default is untouched and permanent.
+        state
+            .engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "w1".into(),
+                event: SessionEvent::SessionStart,
+                project: None,
+                cwd: None,
+                entrypoint: None,
+                started_at_ms: Some(0),
+            })
+            .await;
+        state.engine.dispatch(EngineCommand::SetBoard { id: "w1".into(), board: "work".into() }).await;
+        client.put(format!("{base}/sessions/w1/task")).json(&serde_json::json!({"task_id": on_work.id})).send().await.unwrap();
+
+        assert_eq!(client.delete(format!("{base}/boards/default")).send().await.unwrap().status(), 400);
+        assert_eq!(client.delete(format!("{base}/boards/work")).send().await.unwrap().status(), 200);
+        assert!(state.engine.snapshot().await.is_empty());
+        let snap = state.tasks.snapshot().await;
+        assert_eq!(snap.tasks.len(), 1);
+        assert_eq!(snap.tasks[0].id, on_default.id);
+        assert!(snap.assignments.is_empty());
     }
 }

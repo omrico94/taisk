@@ -25,8 +25,11 @@ pub const HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionEnd", "session-end"),
 ];
 
-fn command_for(hook_bridge_path: &str, arg: &str) -> String {
-    format!("{hook_bridge_path} {arg}")
+fn command_for(hook_bridge_path: &str, arg: &str, board: Option<&str>) -> String {
+    match board {
+        Some(id) => format!("{hook_bridge_path} {arg} --board {id}"),
+        None => format!("{hook_bridge_path} {arg}"),
+    }
 }
 
 fn is_ours(entry_command: &str, hook_bridge_path: &str) -> bool {
@@ -37,6 +40,13 @@ fn is_ours(entry_command: &str, hook_bridge_path: &str) -> bool {
 /// that already has one of our entries (idempotent — safe to call on every
 /// app start). Never touches or removes any other entry.
 pub fn merge_hooks(settings: &mut Value, hook_bridge_path: &str) {
+    merge_hooks_for_board(settings, hook_bridge_path, None);
+}
+
+/// Same as `merge_hooks`, but tags each command with `--board <id>` so the
+/// hook-bridge can say which board's config directory the event came from.
+/// `None` is the default board (bare command).
+pub fn merge_hooks_for_board(settings: &mut Value, hook_bridge_path: &str, board: Option<&str>) {
     if !settings.is_object() {
         *settings = json!({});
     }
@@ -72,7 +82,7 @@ pub fn merge_hooks(settings: &mut Value, hook_bridge_path: &str) {
             groups.push(json!({
                 "matcher": "",
                 "hooks": [
-                    { "type": "command", "command": command_for(hook_bridge_path, arg) }
+                    { "type": "command", "command": command_for(hook_bridge_path, arg, board) }
                 ]
             }));
         }
@@ -115,6 +125,10 @@ pub fn remove_our_hooks(settings: &mut Value, hook_bridge_path: &str) {
 /// in, and writes the result back atomically (temp file + rename, so a crash
 /// mid-write can't corrupt the user's real settings file).
 pub fn apply_to_file(path: &Path, hook_bridge_path: &str) -> std::io::Result<()> {
+    apply_to_file_for_board(path, hook_bridge_path, None)
+}
+
+pub fn apply_to_file_for_board(path: &Path, hook_bridge_path: &str, board: Option<&str>) -> std::io::Result<()> {
     let mut settings: Value = if path.exists() {
         let raw = std::fs::read_to_string(path)?;
         serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
@@ -122,7 +136,7 @@ pub fn apply_to_file(path: &Path, hook_bridge_path: &str) -> std::io::Result<()>
         json!({})
     };
 
-    merge_hooks(&mut settings, hook_bridge_path);
+    merge_hooks_for_board(&mut settings, hook_bridge_path, board);
 
     let pretty = serde_json::to_string_pretty(&settings)?;
     let tmp_path = path.with_extension("json.tmp");
@@ -132,6 +146,18 @@ pub fn apply_to_file(path: &Path, hook_bridge_path: &str) -> std::io::Result<()>
     std::fs::write(&tmp_path, pretty)?;
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+/// Strips our hook entries from the settings file at `path`, if it exists.
+pub fn remove_from_file(path: &Path, hook_bridge_path: &str) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut settings: Value = serde_json::from_str(&std::fs::read_to_string(path)?).unwrap_or_else(|_| json!({}));
+    remove_our_hooks(&mut settings, hook_bridge_path);
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(&settings)?)?;
+    std::fs::rename(&tmp_path, path)
 }
 
 #[cfg(test)]
@@ -233,5 +259,30 @@ mod tests {
         apply_to_file(&path, BRIDGE).unwrap();
         let second: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(second["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn board_tagged_merge_adds_the_board_arg_and_stays_idempotent() {
+        let mut settings = json!({});
+        merge_hooks_for_board(&mut settings, BRIDGE, Some("work"));
+        for (event_key, arg) in HOOK_EVENTS {
+            let cmd = settings["hooks"][event_key][0]["hooks"][0]["command"].as_str().unwrap();
+            assert_eq!(cmd, format!("{BRIDGE} {arg} --board work"));
+        }
+        let after_first = settings.clone();
+        merge_hooks_for_board(&mut settings, BRIDGE, Some("work"));
+        assert_eq!(settings, after_first);
+    }
+
+    #[test]
+    fn remove_from_file_strips_only_our_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        apply_to_file_for_board(&path, BRIDGE, Some("work")).unwrap();
+        remove_from_file(&path, BRIDGE).unwrap();
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["hooks"]["SessionStart"].as_array().unwrap().len(), 0);
+        // A missing file is a no-op, not an error.
+        remove_from_file(&dir.path().join("nope.json"), BRIDGE).unwrap();
     }
 }

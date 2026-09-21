@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useSessionStore } from "./sessionStore";
-import { getSessions, getTasks, WS_URL } from "../api";
+import { getBoards, getSessions, getTasks, WS_URL } from "../api";
 import type { BoardMessage } from "../types";
 
 // M10: the real data source, replacing useMockSessionEngine (M8). Seeds the
@@ -11,6 +11,7 @@ export function useSessionEngine(): void {
   const upsertSession = useSessionStore((s) => s.upsertSession);
   const removeSession = useSessionStore((s) => s.removeSession);
   const setTasksSnapshot = useSessionStore((s) => s.setTasksSnapshot);
+  const setBoards = useSessionStore((s) => s.setBoards);
 
   useEffect(() => {
     let cancelled = false;
@@ -31,6 +32,12 @@ export function useSessionEngine(): void {
           if (!cancelled) setSessions(sessions);
         })
         .catch((err) => console.error("Failed to load sessions from Core Engine:", err));
+
+      getBoards()
+        .then((boards) => {
+          if (!cancelled) setBoards(boards);
+        })
+        .catch((err) => console.error("Failed to load boards from Core Engine:", err));
 
       getTasks()
         .then((snap) => {
@@ -72,5 +79,5 @@ export function useSessionEngine(): void {
       clearTimeout(reconnectTimer);
       ws?.close();
     };
-  }, [setSessions, upsertSession, removeSession, setTasksSnapshot]);
+  }, [setSessions, upsertSession, removeSession, setTasksSnapshot, setBoards]);
 }

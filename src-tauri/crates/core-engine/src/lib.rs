@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod bootstrap;
+pub mod boards;
 pub mod collector;
 pub mod engine;
 pub mod first_run;

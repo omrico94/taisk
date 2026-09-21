@@ -29,6 +29,11 @@ pub struct SessionView {
     /// from durable memory on restart, which has no record of the original
     /// entrypoint) — the common case, not a guess in the dark.
     pub entrypoint: String,
+    /// Which board (Claude config directory / account) this session belongs
+    /// to. `"default"` is `~/.claude`, and what any older payload without the
+    /// field deserializes to.
+    #[serde(default = "default_board")]
+    pub board: String,
     pub state: SessionState,
     /// Short, stable name for the session (e.g. "Auth middleware refactor"),
     /// set once at summary time and never refreshed after — distinct
@@ -72,6 +77,10 @@ pub struct SessionView {
     pub last_activity_ms: i64,
 }
 
+fn default_board() -> String {
+    crate::boards::DEFAULT_BOARD_ID.to_string()
+}
+
 /// A single tracked step from `~/.claude/tasks/<session_id>/*.json`
 /// (Phase 2 design change — real `TaskCreate`/`TaskUpdate` data, not the
 /// deprecated `TodoWrite`).
@@ -99,6 +108,7 @@ impl SessionView {
             project,
             cwd,
             entrypoint,
+            board: default_board(),
             state: SessionState::Working,
             title: "Starting…".to_string(),
             desc: "Starting…".to_string(),
@@ -135,6 +145,10 @@ pub enum EngineCommand {
     /// Set once, at summary time — see `SessionView::title`'s doc
     /// comment for why this is separate from `SetDesc`.
     SetTitle { id: SessionId, title: String },
+    /// Which board the session belongs to; dispatched right after the
+    /// `SessionStart` event (or when reconstructing) rather than threaded
+    /// through `SessionEvent`, which is constructed at many call sites.
+    SetBoard { id: SessionId, board: String },
     SetDesc { id: SessionId, desc: String },
     /// Real usage-derived metrics (`collector::extract_usage_metrics`),
     /// re-sent wholesale on every refresh rather than incrementally updated.
@@ -230,6 +244,12 @@ impl EngineHandle {
                         view.state = state::transition(view.state, event);
                         view.last_activity_ms = crate::now_ms();
                         let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
+                    }
+                    EngineCommand::SetBoard { id, board } => {
+                        if let Some(view) = sessions.get_mut(&id) {
+                            view.board = board;
+                            let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
+                        }
                     }
                     EngineCommand::SetTitle { id, title } => {
                         if let Some(view) = sessions.get_mut(&id) {

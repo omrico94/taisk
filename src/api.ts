@@ -1,4 +1,4 @@
-import type { SearchResult, SessionView, Stage, Task, TasksSnapshot } from "./types";
+import type { Board, SearchResult, SessionView, Stage, Task, TasksSnapshot } from "./types";
 
 // Matches src-tauri/src/lib.rs's API_PORT constant — the desktop app's own
 // Core Engine instance. A future Phase-3 VS Code extension would need real
@@ -50,11 +50,11 @@ export async function getTasks(): Promise<TasksSnapshot> {
 }
 
 /** Throws on a rejected (e.g. blank-title) request so callers can surface it. */
-export async function createTask(title: string, stage: Stage): Promise<Task> {
+export async function createTask(title: string, stage: Stage, board: string): Promise<Task> {
   const resp = await fetch(`${API_BASE}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, stage }),
+    body: JSON.stringify({ title, stage, board }),
   });
   if (!resp.ok) throw new Error(`Failed to create task "${title}" (${resp.status})`);
   return resp.json();
@@ -82,7 +82,45 @@ export async function assignSession(sessionId: string, taskId: string | null): P
   });
 }
 
-export async function search(query: string): Promise<SearchResult[]> {
-  const resp = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}`);
+export async function search(query: string, board: string): Promise<SearchResult[]> {
+  const resp = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}&board=${encodeURIComponent(board)}`);
   return resp.json();
+}
+
+export async function getBoards(): Promise<Board[]> {
+  const resp = await fetch(`${API_BASE}/boards`);
+  return resp.json();
+}
+
+// Board mutations surface the backend's own message (e.g. "another board
+// already uses that config directory") so the dialog can show it verbatim.
+async function boardRequest(url: string, init: RequestInit): Promise<Response> {
+  const resp = await fetch(url, init);
+  if (!resp.ok) {
+    const body = (await resp.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `Request failed (${resp.status})`);
+  }
+  return resp;
+}
+
+export async function createBoard(name: string, configDir: string): Promise<Board> {
+  const resp = await boardRequest(`${API_BASE}/boards`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, config_dir: configDir }),
+  });
+  return resp.json();
+}
+
+export async function renameBoard(id: string, name: string): Promise<Board> {
+  const resp = await boardRequest(`${API_BASE}/boards/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  return resp.json();
+}
+
+export async function deleteBoard(id: string): Promise<void> {
+  await boardRequest(`${API_BASE}/boards/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

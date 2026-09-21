@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::api::AppState;
+use crate::boards::BoardStore;
 use crate::summarize::SummarizeConfig;
 use crate::engine::EngineHandle;
 use crate::memory_repo::MemoryRepo;
@@ -32,14 +33,18 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
     let app_data_dir = crate::first_run::app_data_dir();
     std::fs::create_dir_all(&app_data_dir)?;
 
+    let boards = Arc::new(BoardStore::load(&app_data_dir.join("boards.json")));
     if let Some(path) = &options.hook_bridge_path {
-        let _ = crate::first_run::register_hooks(path);
+        // Every board gets its hooks in its own config dir, not just ~/.claude.
+        for board in boards.list() {
+            let _ = crate::first_run::register_board_hooks(path, &board);
+        }
     }
 
     let repo = Arc::new(MemoryRepo::open(crate::first_run::lancedb_dir().to_str().unwrap()).await?);
     let engine = EngineHandle::spawn();
     let cat_config = Arc::new(SummarizeConfig::default());
-    let orch_config = Arc::new(OrchestratorConfig::default());
+    let orch_config = Arc::new(OrchestratorConfig { boards: boards.clone(), ..OrchestratorConfig::default() });
     // Shared with the orchestrator: approve/reject/reply from the board must
     // evict the same durable "waiting" record a real hook resolution would
     // (see `AppState::waiting_sessions`'s doc comment).
@@ -70,6 +75,8 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
         ollama,
         config: cat_config,
         claude_projects_dir: crate::first_run::claude_projects_dir(),
+        boards,
+        hook_bridge_path: options.hook_bridge_path,
         waiting_sessions,
         dismissed_sessions,
         tasks,

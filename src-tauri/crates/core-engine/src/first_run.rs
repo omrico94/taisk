@@ -51,8 +51,13 @@ pub fn lancedb_dir() -> PathBuf {
     app_data_dir().join("lancedb")
 }
 
+/// The default board's Claude config directory, `~/.claude`.
+pub fn claude_config_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_default().join(".claude")
+}
+
 pub fn claude_settings_path() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".claude").join("settings.json")
+    claude_config_dir().join("settings.json")
 }
 
 pub fn claude_projects_dir() -> PathBuf {
@@ -73,6 +78,22 @@ pub fn register_hooks(hook_bridge_path: &str) -> std::io::Result<PathBuf> {
     let path = claude_settings_path();
     crate::settings_merge::apply_to_file(&path, hook_bridge_path)?;
     Ok(path)
+}
+
+/// Registers our hooks into `board`'s own `<config_dir>/settings.json`. The
+/// default board keeps the bare command (so existing `~/.claude` entries need
+/// no migration); every other board tags its events with `--board <id>`.
+pub fn register_board_hooks(hook_bridge_path: &str, board: &crate::boards::Board) -> std::io::Result<PathBuf> {
+    let path = board.config_dir.join("settings.json");
+    let tag = (board.id != crate::boards::DEFAULT_BOARD_ID).then_some(board.id.as_str());
+    crate::settings_merge::apply_to_file_for_board(&path, hook_bridge_path, tag)?;
+    Ok(path)
+}
+
+/// Removes our hooks from `board`'s settings.json (board deleted). Leaves the
+/// rest of the file, and the config directory itself, alone.
+pub fn unregister_board_hooks(hook_bridge_path: &str, board: &crate::boards::Board) -> std::io::Result<()> {
+    crate::settings_merge::remove_from_file(&board.config_dir.join("settings.json"), hook_bridge_path)
 }
 
 /// One-time, non-blocking scan of existing `~/.claude/projects/**/*.jsonl`

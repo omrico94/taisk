@@ -17,18 +17,44 @@ fn greet(name: &str) -> String {
 /// session by id. Only meaningful for `entrypoint == "cli"` sessions — the
 /// frontend decides whether this command applies (`DetailDrawer.tsx`).
 #[tauri::command]
-fn jump_to_cli_session(cwd: String, session_id: String) -> Result<(), String> {
-    // Two layers of escaping, deliberately not a naive string concatenation:
-    // (1) build the inner shell command with standard POSIX single-quote
-    // escaping so cwd/session_id can't break out of their quoting or inject
-    // extra shell commands; (2) embed that whole string as an AppleScript
-    // double-quoted literal, escaping backslashes/quotes for AppleScript's
-    // own syntax.
-    fn shell_single_quote(s: &str) -> String {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
-    let shell_cmd =
-        format!("cd {} && claude --resume {}", shell_single_quote(&cwd), shell_single_quote(&session_id));
+fn jump_to_cli_session(cwd: String, session_id: String, config_dir: Option<String>) -> Result<(), String> {
+    // Escaped in two layers (see `shell_single_quote` / `run_in_terminal`),
+    // never naive string concatenation.
+    // A session on a non-default board lives under that board's own Claude
+    // config dir; `--resume` only finds it if `claude` runs with the same one.
+    let env_prefix = config_dir
+        .as_deref()
+        .map(|dir| format!("CLAUDE_CONFIG_DIR={} ", shell_single_quote(dir)))
+        .unwrap_or_default();
+    let shell_cmd = format!(
+        "cd {} && {env_prefix}claude --resume {}",
+        shell_single_quote(&cwd),
+        shell_single_quote(&session_id)
+    );
+    run_in_terminal(&shell_cmd)
+}
+
+/// Opens a new Terminal.app window running `claude` under `config_dir`, so the
+/// user can log in to the Claude account that board should use. Login state
+/// is per config dir, which is what keeps boards' accounts separate.
+#[tauri::command]
+fn login_board_terminal(config_dir: String) -> Result<(), String> {
+    let dir = core_engine::boards::expand_home(&config_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let shell_cmd = format!("CLAUDE_CONFIG_DIR={} claude", shell_single_quote(&dir.to_string_lossy()));
+    run_in_terminal(&shell_cmd)
+}
+
+/// POSIX single-quote escaping, so a path or id can't break out of its quoting
+/// or inject extra shell commands.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Runs `shell_cmd` in a new Terminal.app window. The command is embedded as
+/// an AppleScript double-quoted literal, escaping backslashes/quotes for
+/// AppleScript's own syntax.
+fn run_in_terminal(shell_cmd: &str) -> Result<(), String> {
     let osa_escaped = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(r#"tell application "Terminal" to do script "{osa_escaped}""#);
 
@@ -48,7 +74,7 @@ fn jump_to_cli_session(cwd: String, session_id: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, jump_to_cli_session])
+        .invoke_handler(tauri::generate_handler![greet, jump_to_cli_session, login_board_terminal])
         .setup(|_app| {
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = start_core_engine().await {

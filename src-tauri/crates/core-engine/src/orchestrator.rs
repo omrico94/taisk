@@ -20,6 +20,7 @@ use crate::collector::{
     extract_entrypoint, extract_initiating_prompt, extract_latest_activity, extract_usage_metrics, list_subagents,
     project_name_from_cwd, read_lines_from_start, tail_new_lines, transcript_path, TailCheckpoints,
 };
+use crate::boards::{BoardStore, DEFAULT_BOARD_ID};
 use crate::engine::{EngineCommand, EngineHandle};
 use crate::hook_socket::{self, HookEvent};
 use crate::memory_repo::MemoryRepo;
@@ -28,7 +29,12 @@ use crate::plan::read_session_plan;
 use crate::state::SessionEvent;
 
 pub struct OrchestratorConfig {
+    /// The default board's `~/.claude/projects`. Other boards resolve their
+    /// directories through `boards` — see `projects_dir_for`.
     pub claude_projects_dir: PathBuf,
+    /// Known boards and the session -> board assignments. In-memory (and
+    /// therefore default-board-only) unless bootstrap supplies a loaded one.
+    pub boards: Arc<BoardStore>,
     /// `~/.claude/tasks` — real `TaskCreate`/`TaskUpdate` data, read on every
     /// `"stop"` hook to populate a session's plan chip/panel (Phase 2 §4).
     pub tasks_dir: PathBuf,
@@ -85,6 +91,25 @@ pub struct OrchestratorConfig {
     pub dismissed_sessions_path: PathBuf,
 }
 
+impl OrchestratorConfig {
+    /// `projects/` for `board`: the default board uses `claude_projects_dir`
+    /// (overridable, which tests rely on); any other resolves from its config
+    /// directory, falling back to the default if the board is unknown.
+    pub fn projects_dir_for(&self, board: &str) -> PathBuf {
+        match self.boards.get(board) {
+            Some(b) if b.id != DEFAULT_BOARD_ID => b.config_dir.join("projects"),
+            _ => self.claude_projects_dir.clone(),
+        }
+    }
+
+    pub fn tasks_dir_for(&self, board: &str) -> PathBuf {
+        match self.boards.get(board) {
+            Some(b) if b.id != DEFAULT_BOARD_ID => b.config_dir.join("tasks"),
+            _ => self.tasks_dir.clone(),
+        }
+    }
+}
+
 /// Reads a `Duration` (in seconds) from an env var, falling back to
 /// `default` when unset or unparseable. Lets e2e testing shorten the
 /// otherwise-10-minute idle/done TTLs without touching source.
@@ -96,6 +121,7 @@ impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
             claude_projects_dir: crate::first_run::claude_projects_dir(),
+            boards: Arc::new(BoardStore::in_memory()),
             tasks_dir: crate::first_run::claude_tasks_dir(),
             checkpoint_path: crate::first_run::app_data_dir().join("tail-checkpoints.json"),
             socket_path: hook_socket::socket_path(),
@@ -338,7 +364,9 @@ async fn reconstruct_live_sessions(
             continue; // explicitly deleted from the board — stay gone until real activity revives it
         }
 
-        let path = transcript_path(&orch_config.claude_projects_dir, &memory.cwd, &memory.session_id);
+        let board = orch_config.boards.board_of(&memory.session_id);
+        let projects_dir = orch_config.projects_dir_for(&board);
+        let path = transcript_path(&projects_dir, &memory.cwd, &memory.session_id);
         let Ok(metadata) = std::fs::metadata(&path) else { continue };
         let Ok(modified) = metadata.modified() else { continue };
         let Ok(age) = std::time::SystemTime::now().duration_since(modified) else { continue };
@@ -371,6 +399,7 @@ async fn reconstruct_live_sessions(
                 .dispatch(EngineCommand::SetLastActivity { id: memory.session_id.clone(), last_activity_ms: modified_ms })
                 .await;
         }
+        engine.dispatch(EngineCommand::SetBoard { id: memory.session_id.clone(), board: board.clone() }).await;
         if ended_sessions.contains(&memory.session_id) {
             engine
                 .dispatch(EngineCommand::SessionEvent {
@@ -466,9 +495,9 @@ async fn reconstruct_live_sessions(
         // edit) silently wiped a live session's subagent tree/plan until its
         // next Stop hook happened to fire — even though nothing about the
         // underlying data on disk had changed.
-        let subs = list_subagents(&orch_config.claude_projects_dir, &memory.cwd, &memory.session_id);
+        let subs = list_subagents(&projects_dir, &memory.cwd, &memory.session_id);
         engine.dispatch(EngineCommand::SetSubagents { id: memory.session_id.clone(), subs }).await;
-        let plan = read_session_plan(&orch_config.tasks_dir, &memory.session_id, &memory.title);
+        let plan = read_session_plan(&orch_config.tasks_dir_for(&board), &memory.session_id, &memory.title);
         engine.dispatch(EngineCommand::SetPlan { id: memory.session_id, plan }).await;
     }
 }
@@ -682,6 +711,16 @@ async fn handle_hook_event(
             // specific value (e.g. "claude-vscode") — see that fn's doc
             // comment for why the hook payload alone can't distinguish a
             // third-party VS Code integration like DevSwarm.
+            // Set by hook-bridge's `--board <id>` (non-default boards only).
+            // A board that no longer exists (removed, hooks left behind)
+            // falls back to default rather than orphaning the session.
+            let board = event
+                .payload
+                .get("_sessionboard_board")
+                .and_then(|v| v.as_str())
+                .filter(|id| orch_config.boards.get(id).is_some())
+                .unwrap_or(DEFAULT_BOARD_ID)
+                .to_string();
             let hook_entrypoint = event.payload.get("entrypoint").and_then(|v| v.as_str()).map(str::to_string);
 
             // Prefer the path Claude Code itself hands us in the hook
@@ -693,7 +732,7 @@ async fn handle_hook_event(
                 .get("transcript_path")
                 .and_then(|v| v.as_str())
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| transcript_path(&orch_config.claude_projects_dir, &cwd, &session_id));
+                .unwrap_or_else(|| transcript_path(&orch_config.projects_dir_for(&board), &cwd, &session_id));
 
             // Wait for the transcript to actually have extractable content
             // *before* creating the card at all — a session that never
@@ -740,6 +779,11 @@ async fn handle_hook_event(
                     started_at_ms: Some(crate::now_ms()),
                 })
                 .await;
+
+            // Recorded before summarizing so the card is already on the
+            // right board when its title arrives.
+            orch_config.boards.assign(&session_id, &board);
+            engine.dispatch(EngineCommand::SetBoard { id: session_id.clone(), board: board.clone() }).await;
 
             let _ = summarize_session(engine, repo, ollama, cat_config, &session_id, &project, &cwd, "Claude Code", &prompt).await;
         }
@@ -830,12 +874,14 @@ async fn handle_hook_event(
                 .await;
 
             let cwd = event.payload.get("cwd").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let board = orch_config.boards.board_of(&session_id);
+            let projects_dir = orch_config.projects_dir_for(&board);
             let path = event
                 .payload
                 .get("transcript_path")
                 .and_then(|v| v.as_str())
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| transcript_path(&orch_config.claude_projects_dir, &cwd, &session_id));
+                .unwrap_or_else(|| transcript_path(&projects_dir, &cwd, &session_id));
 
             if path.exists() {
                 let lines = {
@@ -869,7 +915,7 @@ async fn handle_hook_event(
                 // subagent, so this is almost always an empty read_dir) —
                 // see `list_subagents`'s doc comment for the mtime-based
                 // Working/Done heuristic this relies on.
-                let subs = list_subagents(&orch_config.claude_projects_dir, &cwd, &session_id);
+                let subs = list_subagents(&projects_dir, &cwd, &session_id);
                 engine.dispatch(EngineCommand::SetSubagents { id: session_id.clone(), subs }).await;
             }
 
@@ -883,7 +929,7 @@ async fn handle_hook_event(
                 .find(|v| v.id == session_id)
                 .map(|v| v.title)
                 .unwrap_or_else(|| "Session".to_string());
-            let plan = read_session_plan(&orch_config.tasks_dir, &session_id, &session_title);
+            let plan = read_session_plan(&orch_config.tasks_dir_for(&board), &session_id, &session_title);
             engine.dispatch(EngineCommand::SetPlan { id: session_id.clone(), plan }).await;
         }
         "session-end" => {
@@ -2395,5 +2441,140 @@ mod tests {
         .await
         .ok()
         .flatten()
+    }
+
+    /// A `session-start` forwarded by a non-default board's hook-bridge
+    /// (`--board work`) must land on that board and be remembered durably; an
+    /// untagged one (a plain `~/.claude` hook) is default, and a tag naming a
+    /// board that doesn't exist must not orphan the session.
+    #[tokio::test]
+    async fn session_start_tagged_with_a_board_lands_on_that_board() {
+        let work_dir = tempfile::tempdir().unwrap();
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let boards = Arc::new(BoardStore::in_memory());
+        boards.add("Work", work_dir.path().to_str().unwrap()).unwrap();
+
+        let cwd = "/Users/omricohen/api-gateway";
+        let transcript = transcript_path(&work_dir.path().join("projects"), cwd, "w1");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            serde_json::json!({"type":"user","message":{"role":"user","content":"Fix the login bug"}}).to_string() + "\n",
+        )
+        .unwrap();
+        let default_transcript = transcript_path(claude_dir.path(), cwd, "d1");
+        std::fs::create_dir_all(default_transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &default_transcript,
+            serde_json::json!({"type":"user","message":{"role":"user","content":"Add a test"}}).to_string() + "\n",
+        )
+        .unwrap();
+
+        let engine = EngineHandle::spawn();
+        let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
+        let ollama = FakeOllamaClient::new_summarizing("Fixing login");
+        let cat_config = SummarizeConfig::default();
+        let orch_config = OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            boards: boards.clone(),
+            checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
+            ended_sessions_path: app_dir.path().join("ended-sessions.json"),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            dismissed_sessions_path: app_dir.path().join("dismissed-sessions.json"),
+            ..OrchestratorConfig::default()
+        };
+        let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
+        let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
+        let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+
+        let mut payload = real_session_start_payload("w1", cwd, &transcript, "startup");
+        payload["_sessionboard_board"] = serde_json::json!("work");
+        handle_hook_event(
+            HookEvent { event: "session-start".into(), payload },
+            &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions,
+        )
+        .await;
+        handle_hook_event(
+            HookEvent { event: "session-start".into(), payload: real_session_start_payload("d1", cwd, &default_transcript, "startup") },
+            &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions,
+        )
+        .await;
+        let mut payload = real_session_start_payload("g1", cwd, &default_transcript, "startup");
+        payload["_sessionboard_board"] = serde_json::json!("ghost");
+        handle_hook_event(
+            HookEvent { event: "session-start".into(), payload },
+            &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions,
+        )
+        .await;
+
+        let snapshot = engine.snapshot().await;
+        let board_of = |id: &str| snapshot.iter().find(|s| s.id == id).unwrap().board.clone();
+        assert_eq!(board_of("w1"), "work");
+        assert_eq!(board_of("d1"), "default");
+        assert_eq!(board_of("g1"), "default");
+        assert_eq!(boards.board_of("w1"), "work");
+    }
+
+    /// Reconstruction has to look for a session's transcript under its own
+    /// board's config dir, and put it back on that board.
+    #[tokio::test]
+    async fn reconstruction_restores_a_session_onto_its_board() {
+        let work_dir = tempfile::tempdir().unwrap();
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let boards = Arc::new(BoardStore::in_memory());
+        boards.add("Work", work_dir.path().to_str().unwrap()).unwrap();
+        boards.assign("w1", "work");
+
+        let cwd = "/Users/omricohen/api-gateway";
+        // Only exists under the work board's projects dir, not ~/.claude's.
+        let path = transcript_path(&work_dir.path().join("projects"), cwd, "w1");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+
+        let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
+        repo.upsert_memory(&Memory {
+            id: "w1-prompt".into(),
+            session_id: "w1".into(),
+            kind: MemoryKind::Prompt,
+            text: "Fix the login bug".into(),
+            embedding: vec![1.0; 768],
+            project: "api-gateway".into(),
+            cwd: cwd.into(),
+            tool: "Claude Code".into(),
+            title: String::new(),
+            created_at: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+        let engine = EngineHandle::spawn();
+        let orch_config = OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            boards,
+            ended_sessions_path: app_dir.path().join("ended-sessions.json"),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            dismissed_sessions_path: app_dir.path().join("dismissed-sessions.json"),
+            ..OrchestratorConfig::default()
+        };
+        reconstruct_live_sessions(
+            &engine,
+            &repo,
+            &orch_config,
+            &EndedSessions::load(&orch_config.ended_sessions_path),
+            &WaitingSessions::load(&orch_config.waiting_sessions_path),
+            &DismissedSessions::load(&orch_config.dismissed_sessions_path),
+        )
+        .await;
+
+        let snapshot = engine.snapshot().await;
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].board, "work");
     }
 }

@@ -1,4 +1,4 @@
-import { useSessionStore } from "../store/sessionStore";
+import { useBoardSessions, useBoardTasks, useSessionStore } from "../store/sessionStore";
 import { useShallow } from "zustand/react/shallow";
 import { SearchField } from "./SearchField";
 import { AskMemoryButton } from "./AskMemoryButton";
@@ -10,9 +10,8 @@ export function Toolbar() {
   const query = useSessionStore((s) => s.query);
   const setQuery = useSessionStore((s) => s.setQuery);
   const setAskOpen = useSessionStore((s) => s.setAskOpen);
-  // Object.values(...) returns a new array every call — without useShallow,
-  // useSyncExternalStore sees a "changed" snapshot on every render and loops.
-  const sessions = useSessionStore(useShallow((s) => Object.values(s.sessions)));
+  // Counts reflect the board being viewed; other boards' counts sit on their tabs.
+  const sessions = useBoardSessions();
   const hideIdle = useSessionStore((s) => s.hideIdle);
   const toggleHideIdle = useSessionStore((s) => s.toggleHideIdle);
 
@@ -20,7 +19,7 @@ export function Toolbar() {
   const waitingCount = sessions.filter((s) => s.state === "Waiting").length;
   // Only orphan idle sessions are hidden (see Board), so only those are counted.
   const assignments = useSessionStore(useShallow((s) => s.assignments));
-  const tasks = useSessionStore(useShallow((s) => s.tasks));
+  const tasks = useBoardTasks();
   const known = new Set(tasks.map((t) => t.id));
   const idleCount = sessions.filter((s) => s.state === "Idle" && !(assignments[s.id] && known.has(assignments[s.id]))).length;
 

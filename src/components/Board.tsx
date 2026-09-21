@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { useSessionStore } from "../store/sessionStore";
+import { useBoardSessions, useBoardTasks, useSessionStore } from "../store/sessionStore";
 import { STAGES, matchesQuery, orphanSessions, sessionsOfTask } from "../store/selectors";
 import { Column } from "./Column";
 import { UnassignedTray } from "./UnassignedTray";
@@ -8,8 +8,8 @@ import { useFlip } from "./useFlip";
 import styles from "./Kanban.module.css";
 
 export function Board() {
-  const sessionsMap = useSessionStore(useShallow((s) => s.sessions));
-  const tasks = useSessionStore(useShallow((s) => s.tasks));
+  const sessions = useBoardSessions();
+  const tasks = useBoardTasks();
   const assignments = useSessionStore(useShallow((s) => s.assignments));
   const query = useSessionStore((s) => s.query);
   const hideIdle = useSessionStore((s) => s.hideIdle);
@@ -19,7 +19,6 @@ export function Board() {
   const rootRef = useRef<HTMLDivElement>(null);
   useFlip(rootRef);
 
-  const sessions = Object.values(sessionsMap);
   const hasQuery = query.trim() !== "";
 
   // A query narrows the board: a task stays if its title or any of its

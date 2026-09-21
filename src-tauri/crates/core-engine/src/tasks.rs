@@ -43,6 +43,14 @@ pub struct Task {
     pub title: String,
     pub stage: Stage,
     pub created_at_ms: i64,
+    /// Board (Claude account) this task lives on. Tasks saved before boards
+    /// existed deserialize to the default board.
+    #[serde(default = "default_board")]
+    pub board: String,
+}
+
+fn default_board() -> String {
+    crate::boards::DEFAULT_BOARD_ID.to_string()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -98,11 +106,15 @@ impl TaskStore {
     }
 
     pub fn create(&mut self, title: &str, stage: Stage) -> Option<Task> {
+        self.create_on_board(title, stage, crate::boards::DEFAULT_BOARD_ID)
+    }
+
+    pub fn create_on_board(&mut self, title: &str, stage: Stage, board: &str) -> Option<Task> {
         let title = title.trim();
         if title.is_empty() {
             return None;
         }
-        let task = Task { id: new_task_id(), title: title.to_string(), stage, created_at_ms: crate::now_ms() };
+        let task = Task { id: new_task_id(), title: title.to_string(), stage, created_at_ms: crate::now_ms(), board: board.to_string() };
         self.data.tasks.push(task.clone());
         Some(task)
     }
@@ -129,6 +141,16 @@ impl TaskStore {
         self.data.assignments.retain(|_, task_id| task_id != id);
         self.settled.remove(id);
         self.data.tasks.len() != before
+    }
+
+    /// Drops every task on `board` and the assignments pointing at them
+    /// (board removed). Returns whether anything changed.
+    pub fn delete_board(&mut self, board: &str) -> bool {
+        let gone: Vec<TaskId> = self.data.tasks.iter().filter(|t| t.board == board).map(|t| t.id.clone()).collect();
+        for id in &gone {
+            self.delete(id);
+        }
+        !gone.is_empty()
     }
 
     /// `task_id: None` unassigns. Returns false for an unknown task id.
@@ -262,6 +284,23 @@ impl TaskHub {
             let t = s.create(title, stage);
             let changed = t.is_some();
             (t, changed)
+        })
+        .await
+    }
+
+    pub async fn create_on_board(&self, title: &str, stage: Stage, board: &str) -> Option<Task> {
+        self.mutate(|s| {
+            let t = s.create_on_board(title, stage, board);
+            let changed = t.is_some();
+            (t, changed)
+        })
+        .await
+    }
+
+    pub async fn delete_board(&self, board: &str) -> bool {
+        self.mutate(|s| {
+            let ok = s.delete_board(board);
+            (ok, ok)
         })
         .await
     }
