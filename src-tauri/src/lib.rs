@@ -6,6 +6,8 @@ use core_engine::ollama::{HttpOllamaClient, OllamaClient};
 use core_engine::terminal::TerminalManager;
 use core_engine::API_PORT;
 
+mod shortcuts;
+
 /// Opens a new Terminal.app window running `claude` under `config_dir`, so the
 /// user can log in to the Claude account that board should use. Login state
 /// is per config dir, which is what keeps boards' accounts separate.
@@ -51,8 +53,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(shortcuts::plugin())
         .invoke_handler(tauri::generate_handler![login_board_terminal])
-        .setup(move |_app| {
+        .on_window_event(shortcuts::on_window_event)
+        .setup(move |app| {
+            shortcuts::setup(app)?;
             let terminal = terminal_for_engine.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = start_core_engine(terminal).await {

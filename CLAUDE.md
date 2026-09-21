@@ -130,3 +130,7 @@ If a session still doesn't show up, check `~/.claude/projects/<sanitized-cwd>/<s
 ### `entrypoint` drives what "Jump to session" can do
 
 `SessionView.entrypoint` is `"cli"` (plain terminal `claude`) or `"claude-desktop"` — captured from the real hook payload at session-start, defaulting to `"cli"` when absent (durable `memories` rows have no record of it, so reconstruction can't recover the original value either). Only `"cli"` sessions can be reattached to (`claude --resume <id>` via a new Terminal window, `src-tauri/src/lib.rs`'s `jump_to_cli_session` command) — there's no known deep-link for a specific Claude Desktop tab, so that case is an honest disabled button, not a fallback guess.
+
+### Shortcut kit (global hotkeys)
+
+`src-tauri/src/shortcuts.rs` registers system-wide hotkeys (tauri-plugin-global-shortcut): **⌥⌘N** opens the quick-add popup (type a title → Enter; with >1 board a keyboard-only picker follows — ↑↓/jk/1-9, Enter, Esc back), **⌥⌘L** opens a read-only floating task list grouped by stage. Change the combos via `QUICK_ADD_KEYS`/`PEEK_KEYS`. Both popups are hidden windows (`quick-add`, `peek`) loading the normal frontend on `#/quick-add` / `#/peek` (routed in `src/main.tsx`, views in `QuickAdd.tsx`/`TaskPeek.tsx`), talking to the engine over the usual HTTP/WS API; they hide on blur and the shell emits `shortcut:shown` to reset/refetch. A tray icon keeps the app alive: closing the main window only hides it, quit via tray or ⌘Q. New tasks land in **To Do**.
