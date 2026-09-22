@@ -49,9 +49,14 @@ export function TaskPeek() {
       };
     };
     connect();
+    // Same safety net as the main board (useSessionEngine.ts): the WS isn't
+    // reliably delivering in the real packaged webview, so poll too rather
+    // than trust it alone.
+    const pollTimer = setInterval(refresh, 4000);
     return () => {
       closed = true;
       clearTimeout(timer);
+      clearInterval(pollTimer);
       ws?.close();
       un.then((f) => f());
     };

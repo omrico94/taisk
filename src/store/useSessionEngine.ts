@@ -74,9 +74,20 @@ export function useSessionEngine(): void {
 
     connect();
 
+    // Safety net: the live WS should make every add/update show up instantly,
+    // but it's not reliably delivering messages in the real packaged webview
+    // (reported bug — a session's own WS opens/reads fine from a plain
+    // browser tab hitting the same engine, yet the board only ever picked up
+    // a change on a manual reload). Rather than chase a WebKit-specific
+    // root cause, fall back to plain polling regardless of what the socket
+    // reports, so the board can't go stale for longer than one interval no
+    // matter what's wrong with it.
+    const pollTimer = setInterval(loadSnapshot, 5000);
+
     return () => {
       cancelled = true;
       clearTimeout(reconnectTimer);
+      clearInterval(pollTimer);
       ws?.close();
     };
   }, [setSessions, upsertSession, removeSession, setTasksSnapshot, setBoards]);
