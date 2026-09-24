@@ -15,9 +15,12 @@ interface Props {
 export function SessionRow({ session, taskId }: Props) {
   const selectCard = useSessionStore((s) => s.selectCard);
 
+  const settled = session.state === "Done" || session.state === "Idle";
+  const cls = [styles.sessionRow, settled ? styles.sessionRowSettled : ""].join(" ");
+
   return (
     <div
-      className={styles.sessionRow}
+      className={cls}
       data-testid="session-row"
       data-session-id={session.id}
       data-flip={`session:${session.id}`}
@@ -37,7 +40,9 @@ export function SessionRow({ session, taskId }: Props) {
       }}
     >
       <SessionStateDot state={session.state} />
-      <span className={styles.sessionTitle}>{session.title}</span>
+      <span className={`${styles.sessionTitle} ${session.state === "Done" ? styles.sessionTitleDone : ""}`}>
+        {session.title}
+      </span>
       {session.subs.length > 0 && <span className={styles.subCount}>⤷{session.subs.length}</span>}
       {session.tokens > 0 && <span className={styles.tokenCount}>{fmtTokens(session.tokens)}</span>}
       <button

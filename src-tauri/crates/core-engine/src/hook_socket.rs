@@ -19,7 +19,7 @@ pub struct HookEvent {
     pub payload: serde_json::Value,
 }
 
-/// `~/Library/Application Support/SessionBoard/engine.sock` (or platform
+/// `~/Library/Application Support/taisk/engine.sock` (or platform
 /// equivalent via the `dirs` crate). Shared convention with `hook-bridge`,
 /// which resolves the same path independently rather than depending on this
 /// crate (keeping the bridge binary's own dependency footprint — and
@@ -28,7 +28,7 @@ pub struct HookEvent {
 pub fn socket_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("SessionBoard")
+        .join("taisk")
         .join("engine.sock")
 }
 
@@ -119,9 +119,9 @@ mod tests {
     }
 
     #[test]
-    fn socket_path_is_under_a_sessionboard_directory() {
+    fn socket_path_is_under_the_taisk_directory() {
         let p = socket_path();
         assert_eq!(p.file_name().unwrap(), "engine.sock");
-        assert_eq!(p.parent().unwrap().file_name().unwrap(), "SessionBoard");
+        assert_eq!(p.parent().unwrap().file_name().unwrap(), "taisk");
     }
 }

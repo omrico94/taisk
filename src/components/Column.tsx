@@ -39,7 +39,7 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
 
   return (
     <div className={styles.column} data-testid={`column-${stage}`}>
-      <div className={styles.columnHeader} style={{ borderBottom: `2px solid ${accent}44` }}>
+      <div className={styles.columnHeader} style={{ borderBottom: `2px solid ${accent}${stage === "inprogress" ? "66" : "44"}` }}>
         <span
           className={styles.columnDot}
           style={{ background: accent, boxShadow: stage === "inprogress" ? `0 0 9px ${accent}99` : undefined }}

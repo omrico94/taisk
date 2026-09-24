@@ -118,7 +118,7 @@ export function TaskCard({ task, sessions }: Props) {
             <div className={styles.rollTrack}>
               <div
                 className={styles.rollFill}
-                style={{ width: `${roll.pct}%`, background: task.stage === "done" ? "#34d399" : "#38bdf8" }}
+                style={{ width: `${roll.pct}%`, background: task.stage === "done" ? "var(--tk-done)" : "var(--tk-lime)" }}
               />
             </div>
             <span className={styles.rollLabel}>

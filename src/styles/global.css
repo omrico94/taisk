@@ -1,5 +1,28 @@
+/* Variable fonts (latin subset) bundled locally — this is a local-first
+   desktop app, no runtime Google Fonts requests. Each file covers the whole
+   400-700 weight range the design uses, so one @font-face per family. */
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("../assets/fonts/SpaceGrotesk-Variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMono-Variable.woff2") format("woff2");
+}
+
 /* Without this the browser's default 8px body margin shows the page's white
-   background as an outline along the top and left of the app. */
+   background as an outline along the top and left of the app. font-family
+   belongs here, not just on App.module.css's `.app`: the shortcut-kit popups
+   (QuickAdd/TaskPeek, src/main.tsx) render standalone, never inside `.app`,
+   so without a base font set this high up they fall back to the browser's
+   own default (serif) instead of the design's UI font. */
 html, body, #root {
   margin: 0;
   padding: 0;
@@ -7,4 +30,6 @@ html, body, #root {
   height: 100%;
   overflow: hidden;
   background: var(--bg-page);
+  font-family: var(--font-ui);
+  color: var(--text-primary);
 }

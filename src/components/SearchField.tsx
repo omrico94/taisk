@@ -13,7 +13,7 @@ export function SearchField({ value, onChange }: Props) {
         className={styles.input}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Filter sessions — or ⌘K to search everything you've ever asked"
+        placeholder="Filter tasks and sessions"
       />
     </div>
   );

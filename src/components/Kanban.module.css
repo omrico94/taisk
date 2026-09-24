@@ -4,8 +4,8 @@
 }
 
 @keyframes waitGlow {
-  0%, 100% { box-shadow: 0 0 0 1px var(--w), 0 6px 26px -12px var(--w); }
-  50% { box-shadow: 0 0 0 1px var(--w), 0 12px 44px -6px var(--w); }
+  0%, 100% { box-shadow: 0 0 0 1px rgba(var(--w), 0.18), 0 0 14px -6px rgba(var(--w), 0.35); }
+  50% { box-shadow: 0 0 0 1px rgba(var(--w), 0.35), 0 0 26px -6px rgba(var(--w), 0.55); }
 }
 
 /* Kanban board (design view 1a). Values are the handoff's, verbatim. */
@@ -60,9 +60,10 @@
 }
 .columnDot { width: 8px; height: 8px; border-radius: 50%; }
 .columnLabel {
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
   font-weight: 700;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
 }
 .columnCount { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); }
@@ -71,10 +72,10 @@
   font-size: 10px;
   padding: 2px 7px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-muted);
+  background: var(--tk-lime-wash);
+  color: var(--tk-lime);
 }
-.wipOver { background: rgba(248, 113, 113, 0.16); color: var(--state-danger); }
+.wipOver { background: rgba(255, 92, 92, 0.12); color: var(--tk-danger-text); }
 
 .columnBody {
   flex: 1;
@@ -89,8 +90,8 @@
   transition: background 0.15s;
 }
 .columnHot {
-  background: rgba(56, 189, 248, 0.08);
-  box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.55);
+  background: rgba(200, 255, 61, 0.05);
+  box-shadow: inset 0 0 0 1.5px rgba(200, 255, 61, 0.45);
 }
 
 .columnFooter { flex: 0 0 auto; }
@@ -99,26 +100,27 @@
   padding: 9px;
   border-radius: 12px;
   background: transparent;
-  border: 1.5px dashed rgba(255, 255, 255, 0.14);
+  border: 1.5px dashed var(--tk-line-hi);
   color: var(--text-muted);
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
 }
-.addButton:hover { border-color: rgba(56, 189, 248, 0.5); color: var(--accent-cyan-light); }
+.addButton:hover { border-color: var(--tk-lime); color: var(--tk-lime); }
 .addRow { display: flex; gap: 6px; }
 .addInput {
   flex: 1;
   min-width: 0;
   padding: 8px 10px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(56, 189, 248, 0.4);
+  background: var(--tk-raised);
+  border: 1px solid var(--tk-line-hi);
   color: var(--text-primary);
   font-size: 12.5px;
   font-family: inherit;
   outline: none;
 }
+.addInput:focus { border-color: var(--tk-lime); box-shadow: 0 0 0 3px rgba(200, 255, 61, 0.12); }
 .addCommit, .addCancel {
   padding: 0 10px;
   border-radius: 10px;
@@ -127,8 +129,8 @@
   font-family: inherit;
   cursor: pointer;
 }
-.addCommit { background: rgba(56, 189, 248, 0.16); border: 1px solid rgba(56, 189, 248, 0.35); color: var(--accent-cyan-light); }
-.addCancel { background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border-10); color: var(--text-muted); }
+.addCommit { background: var(--tk-lime); border: 1px solid var(--tk-lime); color: var(--tk-on-lime); }
+.addCancel { background: transparent; border: 1px solid var(--tk-line); color: var(--tk-muted); font-family: var(--font-mono); }
 
 /* ---------- Task card ---------- */
 .taskCard {
@@ -145,22 +147,22 @@
   transition: opacity 0.15s, box-shadow 0.3s;
 }
 .taskNeeds {
-  --w: rgba(251, 191, 36, 0.5);
-  border-color: rgba(251, 191, 36, 0.55);
+  --w: 255, 159, 28;
+  border-color: rgba(255, 159, 28, 0.55);
   animation: waitGlow 2.8s ease-in-out infinite;
 }
-.taskWorking { box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.14), 0 8px 30px -14px rgba(56, 189, 248, 0.4); }
-.taskDone { opacity: 0.72; }
-.taskDropTarget { outline: 1.5px dashed rgba(56, 189, 248, 0.8); outline-offset: 2px; }
+.taskWorking { border-color: rgba(200, 255, 61, 0.22); box-shadow: 0 10px 28px -16px rgba(200, 255, 61, 0.4); }
+.taskDone { opacity: 0.7; }
+.taskDropTarget { outline: 1.5px dashed var(--tk-lime); outline-offset: 2px; }
 
 .taskTopRow { display: flex; align-items: center; gap: 8px; }
 .toolBadge {
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 9.5px;
+  font-weight: 700;
   padding: 2px 7px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(232, 161, 136, 0.12);
   white-space: nowrap;
   flex: 0 0 auto;
 }
@@ -170,8 +172,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: 10.5px;
+  color: var(--tk-faint);
 }
 .needsPill {
   flex: 0 0 auto;
@@ -182,20 +184,21 @@
   text-transform: uppercase;
   padding: 3px 8px;
   border-radius: var(--radius-pill);
-  background: rgba(251, 191, 36, 0.14);
-  border: 1px solid rgba(251, 191, 36, 0.35);
-  color: var(--state-waiting);
+  background: rgba(255, 159, 28, 0.14);
+  border: 1px solid rgba(255, 159, 28, 0.35);
+  color: var(--tk-waiting-text);
 }
 .taskTitle {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
   color: var(--text-primary);
   line-height: 1.3;
   text-wrap: pretty;
   overflow-wrap: anywhere;
 }
 .rollRow { display: flex; align-items: center; gap: 9px; }
-.rollTrack { flex: 1; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.rollTrack { flex: 1; height: 4px; border-radius: 3px; background: var(--tk-line); overflow: hidden; }
 .rollFill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
 .rollLabel { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); white-space: nowrap; }
 
@@ -210,12 +213,21 @@
 .footerCost { font-family: var(--font-mono); font-size: 11px; color: var(--accent-cyan-light); }
 .noSessions { font-size: 11.5px; font-style: italic; color: var(--text-faint); }
 
-.taskDelete { opacity: 0; transition: opacity 0.15s; }
+.taskDelete { opacity: 0; color: var(--tk-dim); transition: opacity 0.15s, background 0.15s, color 0.15s; }
 .taskCard:hover .taskDelete { opacity: 1; }
+.taskDelete.iconDelete:hover { background: rgba(255, 92, 92, 0.12); color: var(--tk-danger-text); }
 
-.taskStart { opacity: 0; transition: opacity 0.15s; font-weight: 700; }
+.taskStart {
+  opacity: 0;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--tk-line-hi);
+  border-radius: 5px;
+  transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+  font-weight: 700;
+}
 .taskCard:hover .taskStart { opacity: 1; }
-.taskStart:hover { color: var(--accent-cyan-light); }
+.taskStart:hover { color: var(--tk-lime); border-color: var(--tk-lime); }
 
 /* ---------- Session row ---------- */
 .sessionRow {
@@ -223,22 +235,24 @@
   align-items: center;
   gap: 8px;
   padding: 7px 9px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid var(--border-06);
+  border-radius: var(--tk-r-row);
+  background: var(--tk-sunken);
+  border: 1px solid var(--tk-line);
   cursor: grab;
 }
-.sessionRow:hover { background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.14); }
+.sessionRow:hover { border-color: var(--tk-line-hi); }
+.sessionRowSettled { opacity: 0.62; }
 .sessionTitle {
   flex: 1;
   min-width: 0;
   font-size: 11.5px;
   font-weight: 500;
-  color: #dfe3ec;
+  color: var(--tk-ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sessionTitleDone { text-decoration: line-through; color: var(--tk-dim); }
 .subCount { font-family: var(--font-mono); font-size: 10px; color: var(--accent-cyan-light); }
 .tokenCount { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted-alt); }
 .iconButton {
@@ -253,9 +267,10 @@
   border-radius: 5px;
   cursor: pointer;
   padding: 0;
+  transition: background 0.15s, color 0.15s;
 }
-.iconUnassign:hover { color: var(--state-working); }
-.iconDelete:hover { color: var(--state-danger); }
+.iconUnassign:hover { background: var(--tk-lime-wash); color: var(--tk-lime); }
+.iconDelete:hover { background: rgba(255, 92, 92, 0.12); color: var(--tk-danger-text); }
 
 /* ---------- Unassigned tray ---------- */
 .tray {
@@ -271,28 +286,28 @@
   right: 0;
   z-index: 20;
   padding-bottom: 14px;
-  background: #0d1018;
+  background: var(--tk-surface);
   box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.85);
 }
 .trayFloating .trayHeader { margin-bottom: 0; }
-.trayHot { background: rgba(56, 189, 248, 0.07); box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.55); }
+.trayHot { background: rgba(200, 255, 61, 0.05); box-shadow: inset 0 0 0 1.5px rgba(200, 255, 61, 0.45); }
 .trayHeader { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.trayLabel { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
-.trayCount { font-family: var(--font-mono); font-size: 11px; color: #5f6678; }
-.trayHint { font-size: 10.5px; color: #5f6678; }
+.trayLabel { font-family: var(--font-mono); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--tk-muted); }
+.trayCount { font-family: var(--font-mono); font-size: 11px; color: var(--tk-dim); }
+.trayHint { font-size: 11.5px; color: var(--tk-dim); }
 .trayBody { display: flex; flex-wrap: wrap; gap: 9px; min-height: 8px; }
 .chip {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
-  border-radius: 11px;
-  background: var(--surface-card);
-  border: 1px solid var(--border-09);
+  border-radius: var(--tk-r-row);
+  background: var(--tk-raised);
+  border: 1px solid var(--tk-line-hi);
   cursor: grab;
 }
-.chip:hover { border-color: rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); }
-.chipTitle { font-size: 12px; font-weight: 500; color: #dfe3ec; white-space: nowrap; cursor: pointer; }
+.chip:hover { border-color: rgba(200, 255, 61, 0.4); background: rgba(200, 255, 61, 0.06); }
+.chipTitle { font-size: 12px; font-weight: 500; color: var(--tk-ink); white-space: nowrap; cursor: pointer; }
 .assignButton {
   width: 20px;
   height: 20px;
@@ -313,13 +328,13 @@
   z-index: 70;
   max-height: 220px;
   overflow-y: auto;
-  border-radius: 10px;
-  background: #14181f;
+  border-radius: 11px;
+  background: var(--tk-raised);
   border: 1px solid var(--border-12);
   box-shadow: 0 20px 50px -20px rgba(0, 0, 0, 0.8);
   padding: 6px;
 }
-.assignHeader { font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #5f6678; padding: 4px 8px 6px; }
+.assignHeader { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--tk-faint); padding: 4px 8px 6px; }
 .assignEmpty { font-size: 11.5px; color: var(--text-faint); padding: 6px 8px; }
 .assignItem {
   width: 100%;
@@ -336,7 +351,7 @@
   font-family: inherit;
 }
 .assignItem:hover { background: rgba(255, 255, 255, 0.08); }
-.assignTitle { font-size: 12px; color: #dfe3ec; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assignTitle { font-size: 12px; color: var(--tk-ink); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assignProject { font-family: var(--font-mono); font-size: 10px; color: var(--text-faint); }
 
 /* ---------- Empty search ---------- */
@@ -346,15 +361,15 @@
   align-items: center;
   gap: 12px;
   padding: 24px;
-  color: var(--text-muted);
+  color: var(--tk-text-2);
   font-size: 13px;
 }
 .noResultsButton {
   padding: 8px 14px;
   border-radius: var(--radius-pill);
-  background: rgba(56, 189, 248, 0.12);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  color: var(--accent-cyan-light);
+  background: var(--tk-lime-wash);
+  border: 1px solid var(--tk-lime-edge);
+  color: var(--tk-lime);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;

@@ -4,7 +4,7 @@ import type { SessionState } from "../types";
 // of repeated string literals across every component that needs them.
 export const STATE_LABEL: Record<SessionState, string> = {
   Working: "Working",
-  Waiting: "Waiting",
+  Waiting: "Needs you",
   Idle: "Idle",
   Done: "Done",
 };

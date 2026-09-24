@@ -11,11 +11,11 @@
 }
 
 .panel {
-  width: 620px;
+  width: 520px;
   max-width: 92%;
   max-height: calc(100% - 90px);
   overflow-y: auto;
-  border-radius: 20px;
+  border-radius: 18px;
   background: var(--surface-overlay-panel);
   border: 1px solid var(--border-12);
   box-shadow: 0 40px 100px -30px rgba(0, 0, 0, 0.9);
@@ -120,18 +120,32 @@
 }
 
 .danger:hover {
-  color: var(--state-danger);
-  border-color: rgba(248, 113, 113, 0.4);
+  color: var(--tk-danger-text);
+  border-color: rgba(255, 92, 92, 0.4);
+}
+
+.dangerArmed {
+  background: var(--tk-danger);
+  border-color: var(--tk-danger);
+  color: var(--tk-on-lime);
+}
+
+.dangerArmed:hover {
+  background: var(--tk-danger-text);
+  border-color: var(--tk-danger-text);
 }
 
 .primary {
-  background: rgba(56, 189, 248, 0.12);
-  border-color: rgba(56, 189, 248, 0.32);
-  color: var(--accent-cyan-light);
+  background: var(--tk-lime);
+  border-color: var(--tk-lime);
+  color: var(--tk-on-lime);
 }
 
 .primary:disabled {
-  opacity: 0.45;
+  background: var(--tk-line);
+  border-color: var(--tk-line);
+  color: var(--tk-dim);
+  opacity: 1;
   cursor: default;
 }
 
@@ -140,8 +154,9 @@
   flex-direction: column;
   gap: 8px;
   margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border-08);
+  padding: 14px;
+  border: 1px dashed var(--tk-line-hi);
+  border-radius: var(--radius-input);
 }
 
 .formTitle {
@@ -169,7 +184,7 @@
 
 .input:focus,
 .inlineInput:focus {
-  border-color: rgba(56, 189, 248, 0.4);
+  border-color: rgba(200, 255, 61, 0.4);
 }
 
 .formFoot {

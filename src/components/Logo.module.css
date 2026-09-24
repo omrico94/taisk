@@ -6,28 +6,26 @@
 }
 
 .mark {
-  width: 22px;
-  height: 17px;
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
-  overflow: visible;
-}
-
-.trail {
-  animation-name: orbitTrail;
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
 }
 
 .wordmark {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text-primary-alt);
-  letter-spacing: -0.01em;
+  display: inline-flex;
+  align-items: baseline;
+  line-height: 1;
+  font-family: var(--tk-font-mono);
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--tk-ink);
+  letter-spacing: -0.05em;
   white-space: nowrap;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .trail {
-    animation: none;
-  }
+.glyph {
+  width: 0.78em;
+  height: 0.74em;
+  margin: 0 0.04em 0 0.02em;
+  overflow: visible;
 }

@@ -1,8 +1,8 @@
-# SessionBoard
+# taisk
 
 **Every Claude Code session you've got running, on one live board — auto-categorized, searchable, 100% local.**
 
-You open a terminal. You open Claude Desktop. You start three more sessions chasing three different bugs. Ten minutes later you can't remember which one is waiting on you, which one finished, and which one's been quietly sitting idle since lunch. SessionBoard fixes that: it watches every Claude Code session on your machine and turns them into live cards on a board — grouped by what you're actually working on, updated in real time, searchable by meaning, not just keywords.
+You open a terminal. You open Claude Desktop. You start three more sessions chasing three different bugs. Ten minutes later you can't remember which one is waiting on you, which one finished, and which one's been quietly sitting idle since lunch. taisk fixes that: it watches every Claude Code session on your machine and turns them into live cards on a board — grouped by what you're actually working on, updated in real time, searchable by meaning, not just keywords.
 
 No cloud, no accounts, no API keys. Every model call happens on your machine.
 
@@ -12,7 +12,7 @@ No cloud, no accounts, no API keys. Every model call happens on your machine.
 
 ---
 
-![SessionBoard design preview — swimlanes of live session cards, breathing state dots, and a session waiting on approval](docs/design/live-board/preview.gif)
+![taisk design preview — swimlanes of live session cards, breathing state dots, and a session waiting on approval](docs/design/live-board/preview.gif)
 
 *The board this app is being built to match — from the designer's [interactive prototype](docs/design/live-board/SessionBoard.html) (live data and app chrome are still in progress).*
 
@@ -28,7 +28,7 @@ No cloud, no accounts, no API keys. Every model call happens on your machine.
 
 ## Why it's local-first
 
-Every piece of intelligence in SessionBoard runs on your machine, on free, open infrastructure:
+Every piece of intelligence in taisk runs on your machine, on free, open infrastructure:
 
 | Piece | Tech | Why |
 |---|---|---|
@@ -81,7 +81,7 @@ npm install
 npm run tauri dev
 ```
 
-On first run, SessionBoard registers its hooks into `~/.claude/settings.json` (idempotently — safe to run repeatedly, and it only ever touches its own entries) and creates its local data directory at `~/Library/Application Support/SessionBoard` (an embedded LanceDB store — just files on disk, nothing to install).
+On first run, taisk registers its hooks into `~/.claude/settings.json` (idempotently — safe to run repeatedly, and it only ever touches its own entries) and creates its local data directory at `~/Library/Application Support/taisk` (an embedded LanceDB store — just files on disk, nothing to install).
 
 ## Design reference
 

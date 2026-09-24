@@ -1,8 +1,10 @@
 .toolbar {
   display: flex;
   align-items: center;
-  gap: var(--gap-toolbar);
-  padding: 16px 22px;
+  gap: 14px;
+  padding: 11px 18px;
+  background: var(--tk-surface);
+  border-bottom: 1px solid var(--tk-line);
   flex: 0 0 auto;
 }
 
@@ -11,16 +13,16 @@
 }
 
 .caption {
-  font-size: 11.5px;
-  color: var(--text-faint);
+  font-size: 10px;
+  color: var(--tk-dim);
   font-family: var(--font-mono);
 }
 
 .idleToggle {
   padding: 7px 12px;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
+  border: 1px solid var(--tk-line-hi);
   color: var(--text-muted-alt);
   font-size: 12px;
   font-weight: 600;
@@ -29,11 +31,11 @@
 }
 
 .idleToggle:hover {
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .idleToggleActive {
-  background: rgba(56, 189, 248, 0.1);
-  border-color: rgba(56, 189, 248, 0.28);
-  color: var(--accent-cyan-light);
+  background: var(--tk-lime-wash);
+  border-color: var(--tk-lime-edge);
+  color: var(--tk-lime);
 }

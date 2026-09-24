@@ -42,9 +42,33 @@ pub async fn check_ollama_readiness(client: &HttpOllamaClient) -> OllamaReadines
     if missing.is_empty() { OllamaReadiness::Ready } else { OllamaReadiness::MissingModels(missing) }
 }
 
-/// `~/Library/Application Support/SessionBoard` (or platform equivalent).
+/// `~/Library/Application Support/taisk` (or platform equivalent).
 pub fn app_data_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("SessionBoard")
+    dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("taisk")
+}
+
+/// One-time migration from the pre-rename "SessionBoard" data directory to
+/// this one (LanceDB index, boards/tasks/ended-sessions/waiting-sessions
+/// records, `engine.sock`'s parent — everything lives under this single
+/// directory, so a plain rename carries all of it). Must run before anything
+/// else creates `app_data_dir()`, since that would make the new dir already
+/// exist and this become a permanent no-op instead of a one-time migration.
+/// A no-op on any later boot, and for a fresh install that never had the old
+/// directory.
+pub fn migrate_legacy_data_dir() {
+    let new_dir = app_data_dir();
+    if new_dir.exists() {
+        return;
+    }
+    let Some(parent) = new_dir.parent() else { return };
+    let old_dir = parent.join("SessionBoard");
+    if !old_dir.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(parent);
+    if let Err(e) = std::fs::rename(&old_dir, &new_dir) {
+        eprintln!("Could not migrate the old SessionBoard data directory to taisk: {e}");
+    }
 }
 
 pub fn lancedb_dir() -> PathBuf {

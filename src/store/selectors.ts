@@ -1,10 +1,10 @@
 import type { SessionView, Stage, Task, TasksSnapshot } from "../types";
 
 export const STAGES: { key: Stage; label: string; accent: string }[] = [
-  { key: "backlog", label: "Backlog", accent: "#7c7f8c" },
-  { key: "todo", label: "To Do", accent: "#64748b" },
-  { key: "inprogress", label: "In Progress", accent: "#38bdf8" },
-  { key: "done", label: "Done", accent: "#34d399" },
+  { key: "backlog", label: "Backlog", accent: "#A08FC4" },
+  { key: "todo", label: "To Do", accent: "#6FB9C9" },
+  { key: "inprogress", label: "In Progress", accent: "#C8FF3D" },
+  { key: "done", label: "Done", accent: "#86B98C" },
 ];
 
 /** Design constant: In Progress column's WIP limit. */

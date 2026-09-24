@@ -22,12 +22,12 @@
 
 .panel {
   box-sizing: border-box;
-  width: 448px;
+  width: 460px;
   max-width: 94vw;
   max-height: 88vh;
   overflow-y: auto;
-  border-radius: 20px;
-  background: linear-gradient(180deg, #14181f, #0c0f15);
+  border-radius: 18px;
+  background: var(--tk-surface);
   border: 1px solid var(--border-12);
   box-shadow: 0 40px 100px -30px rgba(0, 0, 0, 0.9);
   display: flex;
@@ -38,9 +38,9 @@
 .unassignButton {
   padding: 5px 10px;
   border-radius: 8px;
-  background: rgba(56, 189, 248, 0.12);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  color: var(--accent-cyan-light);
+  background: var(--tk-lime-wash);
+  border: 1px solid var(--tk-lime-edge);
+  color: var(--tk-lime);
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
@@ -107,9 +107,9 @@
   padding: 0 10px;
   height: 26px;
   border-radius: 8px;
-  background: rgba(248, 113, 113, 0.08);
-  border: 1px solid rgba(248, 113, 113, 0.18);
-  color: #f87171;
+  background: rgba(255, 92, 92, 0.08);
+  border: 1px solid rgba(255, 92, 92, 0.18);
+  color: var(--tk-danger-text);
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
@@ -118,7 +118,7 @@
 }
 
 .deleteButton:hover {
-  background: rgba(248, 113, 113, 0.16);
+  background: rgba(255, 92, 92, 0.16);
 }
 
 /* Armed (first click) state: widens into an explicit "Confirm delete" label
@@ -129,13 +129,13 @@
   padding: 0 10px;
   font-size: 11.5px;
   font-weight: 700;
-  background: #f87171;
-  border-color: #f87171;
-  color: #2a0a0a;
+  background: var(--tk-danger);
+  border-color: var(--tk-danger);
+  color: var(--tk-on-lime);
 }
 
 .deleteButtonConfirming:hover {
-  background: #fca5a5;
+  background: var(--tk-danger-text);
 }
 
 .deleteCancelButton {
@@ -324,7 +324,7 @@
 .subConnector {
   width: 14px;
   height: 2px;
-  background: rgba(56, 189, 248, 0.28);
+  background: rgba(200, 255, 61, 0.2);
   flex: 0 0 auto;
   align-self: center;
 }
@@ -337,8 +337,8 @@
   min-width: 0;
   padding: 9px 11px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: var(--tk-raised);
+  border: 1px solid var(--tk-line);
   box-sizing: border-box;
 }
 
@@ -404,8 +404,8 @@
   margin: 12px 20px 4px;
   padding: 13px 15px;
   border-radius: 14px;
-  background: rgba(179, 157, 255, 0.06);
-  border: 1px solid rgba(179, 157, 255, 0.2);
+  background: #0E120A;
+  border: 1px solid rgba(200, 255, 61, 0.16);
 }
 
 .planHeaderRow {
@@ -444,7 +444,7 @@
 .planFill {
   height: 100%;
   border-radius: 3px;
-  background: var(--state-done);
+  background: var(--tk-lime);
   transition: width 0.5s ease;
 }
 
@@ -484,15 +484,15 @@
 }
 
 .planMarkDone {
-  background: var(--state-done);
-  color: #04120b;
+  background: var(--tk-done);
+  color: var(--tk-on-lime);
   border: none;
 }
 
 .planStepText {
   font-size: 12.5px;
   line-height: 1.4;
-  color: #d4d9e4;
+  color: var(--tk-ink-2);
 }
 
 .planStepTextDone {
@@ -556,7 +556,7 @@
 
 .waitingFooter {
   flex-direction: column;
-  background: rgba(251, 191, 36, 0.05);
+  background: rgba(255, 159, 28, 0.05);
 }
 
 .textarea {
@@ -584,9 +584,9 @@
   flex: 1;
   padding: 11px;
   border-radius: 11px;
-  background: var(--state-done);
+  background: var(--tk-lime);
   border: none;
-  color: #04120b;
+  color: var(--tk-on-lime);
   font-weight: 700;
   font-size: 13.5px;
   cursor: pointer;
@@ -596,8 +596,8 @@
 .rejectButton {
   padding: 11px 16px;
   border-radius: 11px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--tk-raised);
+  border: 1px solid var(--tk-line-hi);
   color: var(--text-primary-alt);
   font-weight: 600;
   font-size: 13.5px;
@@ -608,9 +608,9 @@
 .sendButton {
   padding: 11px 16px;
   border-radius: 11px;
-  background: rgba(56, 189, 248, 0.16);
-  border: 1px solid rgba(56, 189, 248, 0.34);
-  color: #8fd6ff;
+  background: var(--tk-lime-wash);
+  border: 1px solid var(--tk-lime-edge);
+  color: var(--tk-lime);
   font-weight: 600;
   font-size: 13.5px;
   cursor: pointer;
@@ -621,8 +621,8 @@
   flex: 1;
   padding: 11px;
   border-radius: 11px;
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--tk-raised);
+  border: 1px solid var(--tk-line-hi);
   color: var(--text-primary-alt);
   font-weight: 600;
   font-size: 13.5px;

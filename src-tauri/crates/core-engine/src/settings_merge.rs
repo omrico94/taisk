@@ -1,4 +1,4 @@
-//! Idempotent merge of SessionBoard's hook entries into Claude Code's
+//! Idempotent merge of taisk's hook entries into Claude Code's
 //! `~/.claude/settings.json` (plan §3). Operates on `serde_json::Value`
 //! rather than a strict struct so any fields we don't model (the user's own
 //! settings, other tools' hooks, etc.) survive completely untouched.
@@ -34,6 +34,33 @@ fn command_for(hook_bridge_path: &str, arg: &str, board: Option<&str>) -> String
 
 fn is_ours(entry_command: &str, hook_bridge_path: &str) -> bool {
     entry_command.contains(hook_bridge_path)
+}
+
+/// Removes hook-bridge entries whose binary no longer exists on disk (a
+/// deleted worktree, an old bundle path). They can never run — each one just
+/// prints "No such file or directory" into every Claude Code session — so
+/// dropping them can't affect any working registration, including other
+/// checkouts' live ones (those paths still exist and are left untouched).
+pub fn prune_dead_hooks(settings: &mut Value) {
+    let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return;
+    };
+    for (_event, groups_val) in hooks.iter_mut() {
+        let Some(groups) = groups_val.as_array_mut() else { continue };
+        for group in groups.iter_mut() {
+            if let Some(hs) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                hs.retain(|h| {
+                    let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else { return true };
+                    let bin = cmd.split_whitespace().next().unwrap_or("");
+                    let is_bridge = std::path::Path::new(bin).file_name().is_some_and(|n| n == "hook-bridge");
+                    !(is_bridge && std::path::Path::new(bin).is_absolute() && !std::path::Path::new(bin).exists())
+                });
+            }
+        }
+        groups.retain(|g| {
+            g.get("hooks").and_then(|h| h.as_array()).map(|hs| !hs.is_empty()).unwrap_or(true)
+        });
+    }
 }
 
 /// Adds our hook entries for every event in `HOOK_EVENTS`, skipping any event
@@ -136,6 +163,7 @@ pub fn apply_to_file_for_board(path: &Path, hook_bridge_path: &str, board: Optio
         json!({})
     };
 
+    prune_dead_hooks(&mut settings);
     merge_hooks_for_board(&mut settings, hook_bridge_path, board);
 
     let pretty = serde_json::to_string_pretty(&settings)?;
@@ -164,7 +192,7 @@ pub fn remove_from_file(path: &Path, hook_bridge_path: &str) -> std::io::Result<
 mod tests {
     use super::*;
 
-    const BRIDGE: &str = "/Applications/SessionBoard.app/Contents/Resources/hook-bridge";
+    const BRIDGE: &str = "/Applications/taisk.app/Contents/Resources/hook-bridge";
 
     #[test]
     fn empty_settings_gets_all_events_added() {
@@ -207,11 +235,9 @@ mod tests {
     }
 
     #[test]
-    fn stale_entry_from_a_previous_version_is_recognized_and_not_duplicated() {
-        // Simulate a previous install of SessionBoard at a different path
-        // than the "current" one used in these tests below — same binary
-        // identity check (contains hook-bridge), different literal string.
-        let stale_bridge = "/Applications/SessionBoard.app/Contents/Resources/hook-bridge";
+    fn existing_entry_at_the_same_path_is_recognized_and_not_duplicated() {
+        // A previous install at the exact same path is recognized, not duplicated.
+        let stale_bridge = BRIDGE;
         let mut settings = json!({
             "hooks": {
                 "SessionStart": [
@@ -284,5 +310,24 @@ mod tests {
         assert_eq!(after["hooks"]["SessionStart"].as_array().unwrap().len(), 0);
         // A missing file is a no-op, not an error.
         remove_from_file(&dir.path().join("nope.json"), BRIDGE).unwrap();
+    }
+
+    #[test]
+    fn prune_removes_only_entries_whose_binary_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("hook-bridge");
+        std::fs::write(&live, "").unwrap();
+        let live = live.to_string_lossy().to_string();
+        let dead = "/nonexistent/worktree/hook-bridge";
+        let mut settings = json!({"hooks": {"Stop": [
+            {"matcher": "", "hooks": [{"type": "command", "command": format!("{live} stop")}]},
+            {"matcher": "", "hooks": [{"type": "command", "command": format!("{dead} stop")}]},
+            {"matcher": "", "hooks": [{"type": "command", "command": "some-other-tool stop"}]}
+        ]}});
+        prune_dead_hooks(&mut settings);
+        let groups = settings["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert!(groups[0]["hooks"][0]["command"].as_str().unwrap().starts_with(&live));
+        assert_eq!(groups[1]["hooks"][0]["command"], "some-other-tool stop");
     }
 }

@@ -6,16 +6,16 @@
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding-top: 70px;
+  padding-top: 90px;
   z-index: 20;
 }
 
 .panel {
-  width: 600px;
+  width: 620px;
   max-width: 90%;
-  border-radius: 20px;
+  border-radius: 16px;
   background: var(--surface-overlay-panel);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--tk-line-hi);
   box-shadow: 0 40px 100px -30px rgba(0, 0, 0, 0.9);
   overflow: hidden;
   /* Entrance/exit motion is handled by Framer Motion in AskMemoryOverlay.tsx. */
@@ -40,7 +40,7 @@
   border: none;
   outline: none;
   color: var(--text-primary);
-  font-size: 15.5px;
+  font-size: 16px;
   font-family: inherit;
 }
 
@@ -88,8 +88,8 @@
   font-size: 11px;
   font-weight: 700;
   color: var(--state-working);
-  background: rgba(56, 189, 248, 0.12);
-  border: 1px solid rgba(56, 189, 248, 0.3);
+  background: rgba(200, 255, 61, 0.12);
+  border: 1px solid rgba(200, 255, 61, 0.3);
   padding: 3px 7px;
   border-radius: 8px;
   flex: 0 0 auto;
@@ -103,7 +103,7 @@
 .snippet {
   font-size: 13.5px;
   font-weight: 500;
-  color: #e6eaf2;
+  color: var(--tk-ink);
 }
 
 .meta {
@@ -121,9 +121,9 @@
 }
 
 .whenLive {
-  color: var(--state-done);
+  color: var(--tk-lime);
 }
 
 .whenHistorical {
-  color: var(--text-muted-alt);
+  color: var(--tk-faint);
 }

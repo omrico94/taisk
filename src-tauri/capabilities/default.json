@@ -6,9 +6,16 @@
   "permissions": [
     "core:default",
     "opener:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "claude://*" }]
+    },
     "global-shortcut:default",
     "core:window:allow-hide",
     "core:window:allow-show",
-    "core:window:allow-set-focus"
+    "core:window:allow-set-focus",
+    "core:window:allow-set-size",
+    "core:window:allow-center",
+    "core:window:allow-inner-size"
   ]
 }

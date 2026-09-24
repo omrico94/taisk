@@ -51,9 +51,15 @@ pub fn run() {
     let terminal = TerminalManager::new();
     let terminal_for_engine = terminal.clone();
 
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(shortcuts::plugin())
+        .plugin(shortcuts::plugin());
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_nspanel::init());
+    }
+    builder
         .invoke_handler(tauri::generate_handler![login_board_terminal])
         .on_window_event(shortcuts::on_window_event)
         .setup(move |app| {

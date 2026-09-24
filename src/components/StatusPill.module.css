@@ -9,8 +9,8 @@
   gap: 9px;
   padding: 9px 15px;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--tk-raised);
+  border: 1px solid var(--tk-line);
   font-size: 12.5px;
 }
 
@@ -32,6 +32,7 @@
 }
 
 .count {
+  font-family: var(--font-mono);
   font-weight: 600;
 }
 

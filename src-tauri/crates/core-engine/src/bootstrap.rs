@@ -33,6 +33,7 @@ pub struct BootstrapOptions {
 /// that's a concern for the UI to surface, not a precondition for starting
 /// the engine itself (plan §9).
 pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> Result<AppState, Box<dyn std::error::Error>> {
+    crate::first_run::migrate_legacy_data_dir();
     let app_data_dir = crate::first_run::app_data_dir();
     std::fs::create_dir_all(&app_data_dir)?;
 

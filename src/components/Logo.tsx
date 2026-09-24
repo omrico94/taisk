@@ -1,48 +1,97 @@
 import styles from "./Logo.module.css";
 
-// Ring path traced from the design handoff's glyph-cyan export
-// (docs/design/brand/svg/glyph-cyan.svg) — kept as one `d` string so the
-// static ring, the animated trail, and the comet dot's <animateMotion> all
-// share the exact same geometry. Total length ~964.4 (measured, see
-// orbitTrail in animations.css) — the trail's dasharray/dashoffset and the
-// dot's motion duration must stay in sync or the comet drifts off its trail.
-const RING_D =
-  "M130.00,0.00L129.88,2.28L129.51,4.56L128.91,6.82L128.06,9.07L126.98,11.29L125.66,13.48L124.10,15.64L122.32,17.76L120.31,19.84L118.08,21.86L115.64,23.83L112.98,25.74L110.13,27.59L107.07,29.36L103.83,31.06L100.40,32.69L96.80,34.22L93.03,35.68L89.10,37.04L85.02,38.31L80.80,39.48L76.45,40.56L71.98,41.53L67.40,42.39L62.72,43.15L57.95,43.80L53.10,44.35L48.18,44.78L43.19,45.09L38.17,45.30L33.10,45.39L28.01,45.37L22.90,45.23L17.78,44.98L12.68,44.62L7.58,44.14L2.52,43.56L-2.51,42.86L-7.49,42.06L-12.41,41.16L-17.27,40.15L-22.05,39.04L-26.74,37.83L-31.34,36.52L-35.84,35.13L-40.23,33.64L-44.49,32.07L-48.63,30.42L-52.64,28.69L-56.50,26.89L-60.22,25.01L-63.78,23.08L-67.18,21.08L-70.42,19.02L-73.49,16.91L-76.39,14.75L-79.10,12.56L-81.64,10.32L-84.00,8.05L-86.17,5.75L-88.15,3.43L-89.94,1.09L-91.54,-1.26L-92.94,-3.62L-94.16,-5.99L-95.18,-8.35L-96.01,-10.71L-96.66,-13.06L-97.11,-15.39L-97.38,-17.71L-97.46,-20.00L-97.36,-22.26L-97.08,-24.49L-96.63,-26.68L-96.00,-28.83L-95.20,-30.94L-94.24,-33.00L-93.12,-35.01L-91.85,-36.96L-90.43,-38.86L-88.86,-40.70L-87.15,-42.47L-85.31,-44.17L-83.33,-45.81L-81.24,-47.37L-79.03,-48.86L-76.72,-50.28L-74.29,-51.61L-71.78,-52.87L-69.17,-54.05L-66.47,-55.15L-63.70,-56.16L-60.86,-57.09L-57.95,-57.94L-54.98,-58.70L-51.97,-59.38L-48.90,-59.97L-45.80,-60.47L-42.66,-60.89L-39.50,-61.23L-36.32,-61.48L-33.12,-61.64L-29.91,-61.72L-26.70,-61.72L-23.49,-61.64L-20.29,-61.47L-17.10,-61.23L-13.93,-60.91L-10.78,-60.51L-7.66,-60.03L-4.57,-59.48L-1.51,-58.86L1.50,-58.16L4.47,-57.40L7.39,-56.57L10.26,-55.67L13.08,-54.71L15.84,-53.69L18.53,-52.61L21.17,-51.47L23.73,-50.27L26.23,-49.02L28.65,-47.72L31.00,-46.36L33.28,-44.96L35.47,-43.51L37.59,-42.02L39.63,-40.49L41.58,-38.91L43.45,-37.30L45.24,-35.65L46.94,-33.97L48.55,-32.26L50.07,-30.51L51.51,-28.74L52.85,-26.94L54.10,-25.12L55.27,-23.27L56.34,-21.40L57.32,-19.52L58.21,-17.62L59.00,-15.70L59.70,-13.76L60.31,-11.82L60.83,-9.87L61.25,-7.90L61.58,-5.93L61.81,-3.96L61.95,-1.98L62.00,-0.00L61.95,1.98L61.81,3.96L61.58,5.93L61.25,7.90L60.83,9.87L60.31,11.82L59.70,13.76L59.00,15.70L58.21,17.62L57.32,19.52L56.34,21.40L55.27,23.27L54.10,25.12L52.85,26.94L51.51,28.74L50.07,30.51L48.55,32.26L46.94,33.97L45.24,35.65L43.45,37.30L41.58,38.91L39.63,40.49L37.59,42.02L35.47,43.51L33.28,44.96L31.00,46.36L28.65,47.72L26.23,49.02L23.73,50.27L21.17,51.47L18.53,52.61L15.84,53.69L13.08,54.71L10.26,55.67L7.39,56.57L4.47,57.40L1.50,58.16L-1.51,58.86L-4.57,59.48L-7.66,60.03L-10.78,60.51L-13.93,60.91L-17.10,61.23L-20.29,61.47L-23.49,61.64L-26.70,61.72L-29.91,61.72L-33.12,61.64L-36.32,61.48L-39.50,61.23L-42.66,60.89L-45.80,60.47L-48.90,59.97L-51.97,59.38L-54.98,58.70L-57.95,57.94L-60.86,57.09L-63.70,56.16L-66.47,55.15L-69.17,54.05L-71.78,52.87L-74.29,51.61L-76.72,50.28L-79.03,48.86L-81.24,47.37L-83.33,45.81L-85.31,44.17L-87.15,42.47L-88.86,40.70L-90.43,38.86L-91.85,36.96L-93.12,35.01L-94.24,33.00L-95.20,30.94L-96.00,28.83L-96.63,26.68L-97.08,24.49L-97.36,22.26L-97.46,20.00L-97.38,17.71L-97.11,15.39L-96.66,13.06L-96.01,10.71L-95.18,8.35L-94.16,5.99L-92.94,3.62L-91.54,1.26L-89.94,-1.09L-88.15,-3.43L-86.17,-5.75L-84.00,-8.05L-81.64,-10.32L-79.10,-12.56L-76.39,-14.75L-73.49,-16.91L-70.42,-19.02L-67.18,-21.08L-63.78,-23.08L-60.22,-25.01L-56.50,-26.89L-52.64,-28.69L-48.63,-30.42L-44.49,-32.07L-40.23,-33.64L-35.84,-35.13L-31.34,-36.52L-26.74,-37.83L-22.05,-39.04L-17.27,-40.15L-12.41,-41.16L-7.49,-42.06L-2.51,-42.86L2.52,-43.56L7.58,-44.14L12.68,-44.62L17.78,-44.98L22.90,-45.23L28.01,-45.37L33.10,-45.39L38.17,-45.30L43.19,-45.09L48.18,-44.78L53.10,-44.35L57.95,-43.80L62.72,-43.15L67.40,-42.39L71.98,-41.53L76.45,-40.56L80.80,-39.48L85.02,-38.31L89.10,-37.04L93.03,-35.68L96.80,-34.22L100.40,-32.69L103.83,-31.06L107.07,-29.36L110.13,-27.59L112.98,-25.74L115.64,-23.83L118.08,-21.86L120.31,-19.84L122.32,-17.76L124.10,-15.64L125.66,-13.48L126.98,-11.29L128.06,-9.07L128.91,-6.82L129.51,-4.56L129.88,-2.28L130.00,-0.00Z";
+// taisk mark, "Checkbox Intelligence" design system (see design handoff
+// README §1). Geometry: viewBox 0 0 64 64, tile inset 5px on each side (54×54,
+// rx 16), tick `M19 34 L28 43 L43 27`, dot `cx=49 cy=19 r=4.6`. At the
+// toolbar's 26px size the mark is a solid lime tile with the tick+dot drawn
+// in ink (the 24-31px rung of the handoff's size ladder) — this component
+// only has one call site (the toolbar), so it doesn't implement the ≥32px
+// outline or <24px tick-only rungs.
+function Mark() {
+  return (
+    <svg className={styles.mark} viewBox="0 0 64 64" role="img" aria-label="taisk">
+      <rect x={5} y={5} width={54} height={54} rx={16} fill="var(--tk-lime)" />
+      <path
+        d="M19 34 L28 43 L43 27"
+        fill="none"
+        stroke="var(--tk-on-lime)"
+        strokeWidth={5.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx={49} cy={19} r={4.6} fill="var(--tk-on-lime)" />
+    </svg>
+  );
+}
 
-const ORBIT_DURATION = "5.4s";
+// `ta` + the tick-and-dot glyph (standing in for the "i") + `sk`. The glyph
+// is inline SVG, not a font character, sized in `em` so it tracks the
+// wordmark's own font-size (see design handoff README §1).
+function Wordmark() {
+  return (
+    <span className={styles.wordmark}>
+      ta
+      <svg viewBox="15 10 40 37" aria-label="i" className={styles.glyph}>
+        <path
+          d="M19 32 L28 43 L43 24"
+          fill="none"
+          stroke="var(--tk-lime)"
+          strokeWidth={8}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <circle cx={49} cy={14} r={6} fill="var(--tk-lime)" />
+      </svg>
+      sk
+    </span>
+  );
+}
+
+// The <24px rung of the handoff's size ladder: solid lime tile, tick only
+// (the dot is dropped at this size). Used by the popup headers. Matches the
+// design handoff's popup-header icon exactly: a lime tile (border-radius
+// 5/18 of its size) with a small centered check glyph (13/18 of the tile),
+// not a scaled-down copy of the full Mark — the check reads bolder and sits
+// with more breathing room than naively scaling Mark down would produce.
+export function TickMark({ size = 18 }: { size?: number }) {
+  const iconSize = (size * 13) / 18;
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: (size * 5) / 18,
+        background: "var(--tk-lime)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flex: "0 0 auto",
+      }}
+    >
+      <svg width={iconSize} height={iconSize} viewBox="0 0 64 64" role="img" aria-label="taisk">
+        <path
+          d="M19 35 L28 44 L45 25"
+          fill="none"
+          stroke="var(--tk-on-lime)"
+          strokeWidth={10}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </div>
+  );
+}
 
 interface Props {
-  /** Renders the "SessionBoard" wordmark next to the mark. Default true. */
+  /** Renders the "taisk" wordmark next to the mark. Default true. */
   withWordmark?: boolean;
 }
 
 export function Logo({ withWordmark = true }: Props) {
   return (
     <div className={styles.lockup}>
-      <svg
-        className={styles.mark}
-        viewBox="-150 -116 300 232"
-        role="img"
-        aria-label="SessionBoard"
-      >
-        <path id="logo-ring" d={RING_D} fill="none" stroke="rgba(56,189,248,.3)" strokeWidth={7} />
-        <path
-          className={styles.trail}
-          d={RING_D}
-          fill="none"
-          stroke="#38bdf8"
-          strokeWidth={8}
-          strokeLinecap="round"
-          strokeDasharray="80 884.4"
-          style={{ animationDuration: ORBIT_DURATION }}
-        />
-        <circle className={styles.comet} r={9} fill="#eaf6ff">
-          <animateMotion dur={ORBIT_DURATION} repeatCount="indefinite" rotate="auto">
-            <mpath href="#logo-ring" />
-          </animateMotion>
-        </circle>
-      </svg>
-      {withWordmark && <span className={styles.wordmark}>SessionBoard</span>}
+      <Mark />
+      {withWordmark && <Wordmark />}
     </div>
   );
 }

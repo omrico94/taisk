@@ -3,7 +3,7 @@ members = ["crates/core-engine", "crates/hook-bridge"]
 resolver = "2"
 
 [package]
-name = "sessionboard"
+name = "taisk"
 version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
@@ -15,14 +15,14 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "sessionboard_lib"
+name = "taisk_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
@@ -33,4 +33,6 @@ axum = "0.8.9"
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 objc2-app-kit = "0.3"
+tauri-nspanel = "2.1"

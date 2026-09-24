@@ -18,7 +18,7 @@ function suggestConfigDir(name: string): string {
 
 // Manage boards: each one is a name plus a Claude config directory, and each
 // config directory holds its own Claude login. Adding a board installs
-// SessionBoard's hooks into that directory; signing in is done in a Terminal
+// taisk's hooks into that directory; signing in is done in a Terminal
 // with CLAUDE_CONFIG_DIR set to it (the "Log in" button opens one).
 export function BoardDialog() {
   const open = useSessionStore((s) => s.boardDialogOpen);
@@ -168,7 +168,7 @@ export function BoardDialog() {
                     )}
                     {board.id !== DEFAULT_BOARD_ID && (
                       <button
-                        className={`${styles.small} ${styles.danger}`}
+                        className={`${styles.small} ${confirmingId === board.id ? styles.dangerArmed : styles.danger}`}
                         onClick={() => void remove(board)}
                         onBlur={() => setConfirmingId(null)}
                       >
@@ -211,7 +211,7 @@ export function BoardDialog() {
             </div>
             {error && <div className={styles.error}>{error}</div>}
             <p className={styles.footnote}>
-              Removing a board only takes its cards off SessionBoard and removes our hooks from its directory. Your Claude
+              Removing a board only takes its cards off taisk and removes our hooks from its directory. Your Claude
               files and transcripts are never deleted.
             </p>
           </motion.div>

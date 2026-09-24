@@ -6,7 +6,7 @@ import { taskMeta, sessionsOfTask } from "../store/selectors";
 import { moveSession } from "./boardActions";
 import styles from "./Kanban.module.css";
 
-const MENU_W = 210;
+const MENU_W = 230;
 
 /** "Assign to…" dropdown for a tray chip. `position: fixed` (anchored to the
  * chip's button rect) so it escapes the board's `overflow` clipping. Closes on

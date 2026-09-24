@@ -24,9 +24,9 @@ import { moveSession } from "./boardActions";
 import styles from "./SessionOverlay.module.css";
 
 const ROLE_COLOR: Record<string, string> = {
-  You: "#7cc5ff",
-  Claude: "#d98a6a",
-  tool: "#7fbf7f",
+  You: "var(--tk-ink)",
+  Claude: "var(--tk-tool-claude-code)",
+  tool: "var(--tk-faint)",
 };
 
 interface Props {
@@ -141,7 +141,7 @@ export function SessionOverlay({ nowMs }: Props) {
     <div className={styles.scrim} data-testid="session-overlay" onClick={() => selectCard(null)}>
     <div className={styles.panel} role="dialog" aria-label={session.title} onClick={(e) => e.stopPropagation()}>
       <div className={styles.header}>
-        <span className={styles.statePill} style={{ color, border: `1px solid ${color}` }}>
+        <span className={styles.statePill} style={{ color, border: `1px solid color-mix(in srgb, ${color} 40%, transparent)` }}>
           <span className={styles.dot} style={{ background: color }} />
           {STATE_LABEL[session.state]}
         </span>
@@ -162,7 +162,7 @@ export function SessionOverlay({ nowMs }: Props) {
           onClick={del}
           title={confirmingDelete ? "Click again to permanently delete" : "Delete this session from the board"}
         >
-          {confirmingDelete ? "Confirm delete" : "Delete session"}
+          {confirmingDelete ? "Confirm delete" : "Delete"}
         </button>
         <button className={styles.closeButton} onClick={() => selectCard(null)}>
           ✕
@@ -235,7 +235,7 @@ export function SessionOverlay({ nowMs }: Props) {
               return (
                 <div className={styles.subRow} key={sub.id}>
                   <span className={styles.subConnector} />
-                  <div className={styles.subCard} style={{ opacity: sub.state === "Done" ? 0.72 : 1 }}>
+                  <div className={styles.subCard} style={{ opacity: sub.state === "Done" ? 0.7 : 1 }}>
                     <div className={styles.identityRow}>
                       <span
                         className={`${styles.subDot} ${sub.state === "Working" ? styles.subDotWorking : ""}`}
@@ -265,7 +265,7 @@ export function SessionOverlay({ nowMs }: Props) {
       {session.plan && (
         <div className={styles.planPanel}>
           <div className={styles.planHeaderRow}>
-            <span className={styles.planGlyph}>◧</span>
+            <span className={styles.planGlyph}>✓</span>
             <span className={styles.planTitle}>{session.plan.title}</span>
           </div>
           <div className={styles.planProgressRow}>

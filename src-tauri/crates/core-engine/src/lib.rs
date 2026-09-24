@@ -1,5 +1,5 @@
 //! Core Engine: session state machine, collectors, memory repo, and local API.
-//! Populated milestone-by-milestone per the SessionBoard implementation plan.
+//! Populated milestone-by-milestone per the taisk implementation plan.
 
 pub mod api;
 pub mod bootstrap;

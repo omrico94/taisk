@@ -22,7 +22,7 @@ use std::time::Duration;
 fn socket_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("SessionBoard")
+        .join("taisk")
         .join("engine.sock")
 }
 
@@ -30,7 +30,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let event = args.get(1).cloned().unwrap_or_default();
     // `--board <id>` is written into non-default boards' settings.json by
-    // SessionBoard, so events say which Claude config directory (account)
+    // taisk, so events say which Claude config directory (account)
     // they came from. Absent means the default board (`~/.claude`).
     let board = args.iter().position(|a| a == "--board").and_then(|i| args.get(i + 1)).cloned();
 
@@ -47,7 +47,7 @@ fn main() {
         obj.insert("_sessionboard_board".to_string(), serde_json::Value::String(board));
     }
 
-    // Set by SessionBoard's "new session from a task" launcher; inherited
+    // Set by taisk's "new session from a task" launcher; inherited
     // from the `claude` process that spawned this hook. Lets the engine file
     // the new session under that task deterministically.
     if let (Some(obj), Ok(task_id)) = (payload.as_object_mut(), std::env::var("SESSIONBOARD_TASK_ID")) {
@@ -72,7 +72,7 @@ fn main() {
 
     // Fire-and-forget: a short connect timeout, one write, then exit — no
     // retry loop. If the Core Engine isn't running, this is expected
-    // (SessionBoard not installed/open) and must be a silent no-op.
+    // (taisk not installed/open) and must be a silent no-op.
     if let Ok(mut stream) = connect_with_timeout(&socket_path(), Duration::from_millis(200)) {
         let _ = stream.write_all(&bytes);
     }

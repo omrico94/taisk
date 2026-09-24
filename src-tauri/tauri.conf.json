@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "sessionboard",
+  "productName": "taisk",
   "version": "0.1.0",
-  "identifier": "com.sessionboard.app",
+  "identifier": "com.taisk.app",
   "build": {
     "beforeDevCommand": "cargo build -p hook-bridge --manifest-path src-tauri/Cargo.toml && npm run dev",
     "devUrl": "http://localhost:1420",
@@ -10,9 +10,10 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "SessionBoard",
+        "title": "taisk",
         "width": 1240,
         "height": 820,
         "minWidth": 900,

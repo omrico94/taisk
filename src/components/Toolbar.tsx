@@ -39,7 +39,7 @@ export function Toolbar() {
         </button>
       )}
       <StatusPill workingCount={workingCount} waitingCount={waitingCount} />
-      <span className={styles.caption}>100% local · Ollama + LanceDB on-device</span>
+      <span className={styles.caption}>100% local · Ollama + LanceDB</span>
     </div>
   );
 }

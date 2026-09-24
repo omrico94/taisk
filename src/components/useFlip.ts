@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 
-const FLIP_MS = 640;
+const FLIP_MS = 420;
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
 
 /**

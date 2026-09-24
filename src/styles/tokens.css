@@ -1,88 +1,123 @@
-/* Design tokens — from the approved Kanban design handoff (view 1a — workflow columns).
-   Consumed by components starting in milestone M8. Do not hand-tune values here;
-   change the design doc first, then mirror the change. */
+/* taisk design tokens — drop-in replacement for src/styles/tokens.css.
+   Every existing variable name is kept (so no component breaks on swap) but
+   re-pointed at the lime system. New names are added under "taisk". Once all
+   modules read the new names, the legacy aliases at the bottom can go. */
 
 :root {
-  /* Surfaces */
-  --bg-app-gradient: linear-gradient(180deg, #0d1018, #090b11);
-  --bg-page: #08090d;
-  --surface-card: rgba(255, 255, 255, 0.045);
-  --surface-drawer-gradient: linear-gradient(180deg, rgba(20, 24, 32, 0.9), rgba(12, 15, 21, 0.95));
-  --surface-overlay-panel: rgba(18, 22, 30, 0.96);
-  --surface-scrim: rgba(6, 8, 12, 0.62);
+  /* ---- taisk: surfaces (green-biased greys) ---- */
+  --tk-void: #050607;      /* window background */
+  --tk-surface: #0C0E10;   /* toolbar, tabs, overlays, dialogs */
+  --tk-raised: #14171A;    /* task cards, inputs, chips, menus */
+  --tk-sunken: #0C0E10;    /* session rows inside a card */
+  --tk-line: #1E2226;      /* default 1px borders, dividers, bar tracks */
+  --tk-line-hi: #2A2F34;   /* input / chip / overlay borders, hover borders */
+  --tk-scrim: rgba(5, 6, 7, 0.7);
+  --tk-terminal-bg: #0A0B0D;
 
-  /* Borders */
-  --border-06: rgba(255, 255, 255, 0.06);
-  --border-08: rgba(255, 255, 255, 0.08);
-  --border-09: rgba(255, 255, 255, 0.09);
-  --border-10: rgba(255, 255, 255, 0.1);
-  --border-12: rgba(255, 255, 255, 0.12);
+  /* ---- taisk: text ---- */
+  --tk-ink: #E9EDE4;
+  --tk-ink-2: #B4BAAE;     /* transcript body */
+  --tk-text-2: #969C90;    /* descriptions, secondary */
+  --tk-muted: #7F857A;
+  --tk-faint: #646A5F;     /* mono labels, project slugs */
+  --tk-dim: #4E544A;       /* placeholders, resting icon buttons */
 
-  /* Text */
-  --text-primary: #f2f4f9;
-  --text-primary-alt: #e8eaf0;
-  --text-primary-alt2: #e4e7ef;
-  --text-secondary: #a4abbd;
-  --text-secondary-alt: #c4cad8;
-  --text-muted: #8b93a7;
-  --text-muted-alt: #7a8194;
-  --text-faint: #6b7185;
-  --text-divider-dim: #454b5c;
-  --text-desc: #98a0b3;
+  /* ---- taisk: the one accent ---- */
+  --tk-lime: #C8FF3D;
+  --tk-lime-hover: #D8FF6E;
+  --tk-lime-press: #A8E020;
+  --tk-lime-tint: #E4FF9B;
+  --tk-lime-wash: #1B2410;           /* tinted button / badge fill */
+  --tk-lime-edge: rgba(200, 255, 61, 0.28);
+  --tk-lime-glow: rgba(200, 255, 61, 0.7);
+  --tk-on-lime: #0A0C08;             /* text/icons on a lime fill */
 
-  /* State colors */
-  --state-working: #38bdf8;
-  --state-working-glow: rgba(56, 189, 248, 0.6);
-  --state-waiting: #fbbf24;
-  --state-waiting-glow: rgba(251, 191, 36, 0.55);
-  --state-idle: #64748b;
-  --state-done: #34d399;
-  /* Context-window bar's >=90% urgency color (Phase 2) — distinct from every
-     other state color, since it's a fill-ratio warning, not a session state. */
-  --state-danger: #f87171;
-  /* Light-cyan accent text — cost badges, "Ask memory" label, relevance
-     badges: anywhere the design uses this specific lighter cyan for text
-     rather than the base --state-working cyan used for dots/fills. */
-  --accent-cyan-light: #8fd6ff;
-  /* Plan chip/panel accent (Phase 2) — distinct violet used only for the
-     linked-execution-plan chip, progress bar, and checklist. */
-  --accent-violet: #b39dff;
+  /* ---- taisk: session states ---- */
+  --tk-working: #C8FF3D;             /* breathes */
+  --tk-waiting: #FF9F1C;             /* static glow */
+  --tk-waiting-text: #FFBE63;
+  --tk-waiting-glow: rgba(255, 159, 28, 0.6);
+  --tk-danger: #FF5C5C;
+  --tk-danger-text: #FF8F8F;
+  --tk-idle: #4E544A;
+  --tk-done: #7C8B72;                /* deliberately the dullest colour */
 
-  /* Tool colors */
-  --tool-claude-code: #d98a6a;
-  --tool-aider: #7fbf7f;
-  --tool-cursor: #7aa7ff;
+  /* ---- taisk: columns ---- */
+  --tk-col-backlog: #A08FC4;   /* dusty lavender */
+  --tk-col-todo: #6FB9C9;      /* muted teal */
+  --tk-col-inprogress: #C8FF3D;
+  --tk-col-done: #86B98C;      /* sage */
 
-  /* Traffic lights */
-  --traffic-red: #ff5f57;
-  --traffic-yellow: #febc2e;
-  --traffic-green: #28c840;
+  /* ---- taisk: tools ---- */
+  --tk-tool-claude-code: #E8A188;
 
-  /* Links */
-  --link: #7cc5ff;
-  --link-hover: #a9d8ff;
+  /* ---- taisk: type ---- */
+  --tk-font-ui: "Space Grotesk", -apple-system, BlinkMacSystemFont, sans-serif;
+  --tk-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* Typography */
-  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* ---- taisk: geometry ---- */
+  --tk-r-chip: 5px;
+  --tk-r-row: 9px;
+  --tk-r-card: 14px;
+  --tk-r-panel: 18px;
+  --tk-r-pill: 100px;
 
-  /* Radii */
-  --radius-card: 15px;
-  --radius-input: 12px;
-  --radius-window: 24px;
-  --radius-pill: 100px;
+  /* ---- taisk: motion ---- */
+  --tk-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --tk-ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --tk-dur-hover: 140ms;
+  --tk-dur-press: 90ms;
+  --tk-dur-panel: 300ms;
+  --tk-dur-flip: 420ms;
+  --tk-dur-reflow: 640ms;
+  --tk-dur-breathe: 2.6s;
+  --tk-dur-wait: 2.8s;
 
-  /* Spacing */
-  --gap-card: 11px;
-  --gap-lane: 22px;
-  --gap-toolbar: 14px;
-  --gap-card-wrap: 14px;
-  --padding-content: 20px;
-
-  /* Motion */
-  --ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
-  --duration-ambient: 2.6s;
-  --duration-drawer: 0.42s;
-  --duration-overlay: 0.3s;
-  --duration-flip: 680ms;
+  /* ---- legacy names, re-pointed (keep until every module is migrated) ---- */
+  --bg-app-gradient: var(--tk-void);          /* no gradients in chrome */
+  --bg-page: var(--tk-void);
+  --surface-card: var(--tk-raised);
+  --surface-drawer-gradient: var(--tk-surface);
+  --surface-overlay-panel: var(--tk-surface);
+  --surface-scrim: var(--tk-scrim);
+  --border-06: var(--tk-line);
+  --border-08: var(--tk-line);
+  --border-09: var(--tk-line);
+  --border-10: var(--tk-line-hi);
+  --border-12: var(--tk-line-hi);
+  --text-primary: var(--tk-ink);
+  --text-primary-alt: var(--tk-ink);
+  --text-primary-alt2: var(--tk-ink);
+  --text-secondary: var(--tk-text-2);
+  --text-secondary-alt: var(--tk-text-2);
+  --text-muted: var(--tk-muted);
+  --text-muted-alt: var(--tk-muted);
+  --text-faint: var(--tk-faint);
+  --text-divider-dim: var(--tk-dim);
+  --text-desc: var(--tk-text-2);
+  --state-working: var(--tk-working);
+  --state-working-glow: var(--tk-lime-glow);
+  --state-waiting: var(--tk-waiting);
+  --state-waiting-glow: var(--tk-waiting-glow);
+  --state-idle: var(--tk-idle);
+  --state-done: var(--tk-done);
+  --state-danger: var(--tk-danger);
+  --accent-cyan-light: var(--tk-lime);         /* cost, Ask memory, relevance */
+  --accent-violet: var(--tk-lime);             /* plan panel — no second accent */
+  --tool-claude-code: var(--tk-tool-claude-code);
+  --tool-aider: var(--tk-muted);
+  --tool-cursor: var(--tk-muted);
+  --link: var(--tk-lime);
+  --link-hover: var(--tk-lime-tint);
+  --font-ui: var(--tk-font-ui);
+  --font-mono: var(--tk-font-mono);
+  --radius-card: var(--tk-r-card);
+  --radius-input: var(--tk-r-row);
+  --radius-window: var(--tk-r-panel);
+  --radius-pill: var(--tk-r-pill);
+  --ease-standard: var(--tk-ease);
+  --duration-ambient: var(--tk-dur-breathe);
+  --duration-overlay: var(--tk-dur-panel);
+  --duration-flip: var(--tk-dur-flip);
+  /* --traffic-* removed: the native window chrome draws those. */
 }

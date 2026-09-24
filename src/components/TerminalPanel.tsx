@@ -7,11 +7,12 @@ import { useTerminalSocket } from "../store/useTerminalSocket";
 import { STATE_COLOR_VAR } from "../styles/sessionStyle";
 import styles from "./TerminalPanel.module.css";
 
+// xterm needs real hex/rgba values, not CSS custom properties.
 const THEME = {
-  background: "#0a0c12",
-  foreground: "#e4e7ef",
-  cursor: "#8fd6ff",
-  selectionBackground: "rgba(143, 214, 255, 0.28)",
+  background: "#0A0B0D",
+  foreground: "#E9EDE4",
+  cursor: "#C8FF3D",
+  selectionBackground: "rgba(200, 255, 61, 0.22)",
 };
 
 /**
@@ -41,7 +42,7 @@ export function TerminalPanel() {
     if (!mounted || !hostRef.current) return;
     const t = new Terminal({
       theme: THEME,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontFamily: "JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace",
       fontSize: 12.5,
       cursorBlink: true,
       scrollback: 5000,

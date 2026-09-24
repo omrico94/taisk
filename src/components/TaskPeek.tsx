@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { getBoards, getTasks, WS_URL } from "../api";
+import { STAGES as COLUMN_STAGES } from "../store/selectors";
 import type { Board, BoardMessage, Stage, Task, TasksSnapshot } from "../types";
+import { useAutoResizeWindow } from "./useAutoResizeWindow";
 import styles from "./Popup.module.css";
+
+const PANEL_WIDTH = 360;
+const PANEL_MAX_HEIGHT = 520;
+
+const accentOf = (stage: Stage) => COLUMN_STAGES.find((s) => s.key === stage)?.accent ?? "var(--tk-muted)";
 
 const STAGES: { stage: Stage; label: string }[] = [
   { stage: "inprogress", label: "In Progress" },
@@ -18,6 +25,8 @@ export function TaskPeek() {
   const [snap, setSnap] = useState<TasksSnapshot>({ tasks: [], assignments: {} });
   const [boards, setBoards] = useState<Board[]>([]);
   const [error, setError] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  useAutoResizeWindow(panelRef, PANEL_WIDTH, PANEL_MAX_HEIGHT);
 
   const refresh = useCallback(() => {
     setError(false);
@@ -74,17 +83,17 @@ export function TaskPeek() {
   const sessionCount = (t: Task) => Object.values(snap.assignments).filter((id) => id === t.id).length;
 
   return (
-    <div className={styles.panel}>
+    <div className={styles.panel} ref={panelRef}>
       <div className={styles.title}>Tasks</div>
-      {error && <div className={styles.error}>Can't reach the SessionBoard engine</div>}
-      <div className={styles.list} style={{ gap: 10 }}>
+      {error && <div className={styles.error}>Can't reach the taisk engine</div>}
+      <div className={styles.list} style={{ gap: 10, maxHeight: 440 }}>
         {snap.tasks.length === 0 && !error && <div className={styles.empty}>No tasks yet.</div>}
         {STAGES.map(({ stage, label }) => {
           const tasks = snap.tasks.filter((t) => t.stage === stage);
           if (tasks.length === 0) return null;
           return (
             <div key={stage}>
-              <div className={styles.hint}>
+              <div className={styles.stageHeader} style={{ color: accentOf(stage) }}>
                 {label} · {tasks.length}
               </div>
               {tasks.map((t) => (

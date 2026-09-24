@@ -3,8 +3,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { createTask, getBoards } from "../api";
 import type { Board } from "../types";
+import { TickMark } from "./Logo";
+import { useAutoResizeWindow } from "./useAutoResizeWindow";
 import styles from "./Popup.module.css";
 
+const PANEL_WIDTH = 460;
+const PANEL_MAX_HEIGHT = 480;
 const LAST_BOARD_KEY = "quickAdd.lastBoard";
 
 function lastBoardId(): string | null {
@@ -25,6 +29,8 @@ export function QuickAdd() {
   const [status, setStatus] = useState<"idle" | "saving" | "added">("idle");
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  useAutoResizeWindow(panelRef, PANEL_WIDTH, PANEL_MAX_HEIGHT);
 
   const reset = useCallback(() => {
     setTitle("");
@@ -37,7 +43,7 @@ export function QuickAdd() {
         const i = b.findIndex((x) => x.id === lastBoardId());
         setSelected(i >= 0 ? i : 0);
       })
-      .catch(() => setError("Can't reach the SessionBoard engine"));
+      .catch(() => setError("Can't reach the taisk engine"));
     setTimeout(() => inputRef.current?.focus(), 0);
   }, []);
 
@@ -113,10 +119,13 @@ export function QuickAdd() {
   });
 
   return (
-    <div className={styles.panel}>
+    <div className={styles.panel} ref={panelRef}>
       {!picking ? (
         <>
-          <div className={styles.title}>New task</div>
+          <div className={styles.header}>
+            <TickMark size={18} />
+            <span className={styles.title}>New task</span>
+          </div>
           <input
             ref={inputRef}
             className={styles.input}
@@ -136,13 +145,17 @@ export function QuickAdd() {
         </>
       ) : (
         <>
-          <div className={styles.title}>Add to board</div>
+          <div className={styles.header}>
+            <TickMark size={18} />
+            <span className={styles.title}>Add to board</span>
+          </div>
           <div className={styles.typed}>{title}</div>
-          <ul className={styles.list}>
+          <ul className={styles.list} style={{ maxHeight: 360 }}>
             {boards.map((b, i) => (
-              <li key={b.id} className={`${styles.row} ${i === selected ? styles.rowActive : ""}`}>
-                <span className={styles.key}>{i < 9 ? i + 1 : ""}</span>
-                <span className={styles.name}>{b.name}</span>
+              <li key={b.id} className={`${styles.boardRow} ${i === selected ? styles.boardRowActive : ""}`}>
+                <span className={styles.boardKey}>{i < 9 ? i + 1 : ""}</span>
+                <span className={styles.boardName}>{b.name}</span>
+                <span className={styles.boardMeta}>{b.config_dir}</span>
               </li>
             ))}
           </ul>

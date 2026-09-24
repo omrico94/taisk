@@ -378,7 +378,7 @@ async fn update_board(
     state.boards.rename(&id, &body.name).map(Json).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))
 }
 
-/// Removes a board: takes its live cards and its tasks off SessionBoard and
+/// Removes a board: takes its live cards and its tasks off taisk and
 /// strips our hooks from its config directory. Never touches the directory's
 /// other contents or any transcripts.
 async fn delete_board(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
