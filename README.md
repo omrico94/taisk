@@ -81,6 +81,22 @@ A read-only floating list of every task, grouped by stage. It sizes itself to it
 
 taisk is a native macOS app (Tauri). It relies on macOS APIs, so macOS is the supported platform.
 
+### Homebrew (recommended)
+
+```bash
+brew install --cask omrico94/taisk/taisk
+```
+
+This installs the app and [Ollama](https://ollama.com). On first launch, pull the two small models taisk uses:
+
+```bash
+ollama pull nomic-embed-text && ollama pull qwen2.5:1.5b
+```
+
+You also need [Claude Code](https://claude.com/claude-code). Uninstall with `brew uninstall --cask --zap taisk`.
+
+### Build from source
+
 ### Prerequisites
 
 | Tool | Why | Install |

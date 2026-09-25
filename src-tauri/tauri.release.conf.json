@@ -1,0 +1,6 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/hook-bridge"],
+    "macOS": { "minimumSystemVersion": "12.0" }
+  }
+}

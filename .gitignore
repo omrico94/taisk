@@ -26,3 +26,6 @@ dist-ssr
 # Local tool config (personal dev-server launch shortcut) — but .claude/skills/
 # is real project tooling (e.g. the installer skill) and should be tracked.
 .claude/launch.json
+
+# Built by scripts/prepare-hook-bridge.sh for release bundles
+src-tauri/binaries/
