@@ -26,6 +26,9 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # lancedb's build scripts need protoc; the macOS runner doesn't ship it.
+      - run: brew install protobuf
+
       - run: npm ci
 
       - name: Build hook-bridge (universal)
