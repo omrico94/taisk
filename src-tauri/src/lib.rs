@@ -88,20 +88,18 @@ pub fn run() {
 /// to. The actual bootstrap logic lives in `core_engine::bootstrap` so the
 /// standalone dev-server example shares it exactly.
 async fn start_core_engine(terminal: TerminalManager) -> Result<(), Box<dyn std::error::Error>> {
-    // hook-bridge is built as a sibling binary in the same workspace, so it
-    // lands next to this executable in target/debug — but `cargo tauri dev`'s
-    // own DevCommand (`cargo run` for just the `sessionboard` package) never
-    // builds it; nothing else in this crate depends on it. tauri.conf.json's
-    // `beforeDevCommand` builds it explicitly for that reason (a real, once-
-    // shipped bug: a fresh worktree ran fine but every hook silently failed
-    // to reach this engine — Claude Code fell back to some *other* checkout's
-    // stale hook-bridge binary already registered in ~/.claude/settings.json,
-    // since the registered path here simply didn't exist yet). A
-    // packaged/installed build resolves this to a bundled resource path
-    // instead — that repackaging concern is out of scope here.
-    let hook_bridge_path = std::env::current_exe()
+    // hook-bridge sits next to this executable: in target/debug for dev
+    // (`beforeDevCommand` builds it), or in Contents/MacOS for a release
+    // bundle (`externalBin` in tauri.release.conf.json).
+    let sibling = std::env::current_exe()
         .ok()
-        .map(|p| p.with_file_name("hook-bridge").to_string_lossy().to_string());
+        .map(|p| p.with_file_name("hook-bridge"));
+    // Claude Code's settings.json stores the absolute path, so a bundled
+    // build registers a stable copy under the data dir. That way the hooks
+    // keep working when the .app is upgraded, moved or reinstalled.
+    let hook_bridge_path = sibling
+        .map(|p| if cfg!(debug_assertions) { p } else { install_stable_hook_bridge(&p).unwrap_or(p) })
+        .map(|p| p.to_string_lossy().to_string());
 
     let ollama: Arc<dyn OllamaClient> = Arc::new(HttpOllamaClient::local());
     let api_state = bootstrap::start(ollama, BootstrapOptions { hook_bridge_path, terminal }).await?;
@@ -112,4 +110,24 @@ async fn start_core_engine(terminal: TerminalManager) -> Result<(), Box<dyn std:
     });
 
     Ok(())
+}
+
+/// Copies the bundled hook-bridge to `<data dir>/bin/hook-bridge`, replacing
+/// it only when its bytes differ (so a running hook is never clobbered by an
+/// identical rewrite). Returns the stable path.
+fn install_stable_hook_bridge(bundled: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = core_engine::first_run::app_data_dir().join("bin");
+    std::fs::create_dir_all(&dir)?;
+    let dest = dir.join("hook-bridge");
+    let new_bytes = std::fs::read(bundled)?;
+    if std::fs::read(&dest).ok().as_deref() != Some(new_bytes.as_slice()) {
+        // Write-then-rename so Claude Code never execs a half-written file.
+        let tmp = dir.join("hook-bridge.tmp");
+        std::fs::write(&tmp, &new_bytes)?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&tmp, &dest)?;
+    }
+    Ok(dest)
 }

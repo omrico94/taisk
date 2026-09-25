@@ -1,0 +1,56 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Build hook-bridge (universal)
+        run: scripts/prepare-hook-bridge.sh universal-apple-darwin
+
+      - name: Build app (universal dmg)
+        run: >
+          npm run tauri build --
+          --target universal-apple-darwin
+          --bundles dmg
+          --config src-tauri/tauri.release.conf.json
+
+      - name: Name the artifact and hash it
+        id: pkg
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          src=$(ls src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -1)
+          dest="taisk_${version}_universal.dmg"
+          cp "$src" "$dest"
+          shasum -a 256 "$dest" | tee "$dest.sha256"
+          echo "dmg=$dest" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pkg.outputs.dmg }}
+            ${{ steps.pkg.outputs.dmg }}.sha256
+          generate_release_notes: true
