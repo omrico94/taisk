@@ -25,15 +25,75 @@ pub const HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionEnd", "session-end"),
 ];
 
+/// Single-quotes `path` for `sh` when it holds anything the shell would split
+/// or interpret (the installed bridge lives under `Application Support`);
+/// plain paths are left bare.
+fn shell_quote(path: &str) -> String {
+    let plain = !path.is_empty() && path.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+:@%,=".contains(c));
+    if plain {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    }
+}
+
+/// The program token of a hook command, honouring a leading single quote.
+fn program_of(cmd: &str) -> String {
+    let cmd = cmd.trim_start();
+    if let Some(rest) = cmd.strip_prefix('\'') {
+        let mut out = String::new();
+        let mut chars = rest.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\'' {
+                // `'\''` is an escaped quote; anything else ends the token.
+                if chars.clone().take(3).collect::<String>() == r"\''" {
+                    chars.nth(2);
+                    out.push('\'');
+                    continue;
+                }
+                break;
+            }
+            out.push(c);
+        }
+        out
+    } else {
+        cmd.split_whitespace().next().unwrap_or("").to_string()
+    }
+}
+
 fn command_for(hook_bridge_path: &str, arg: &str, board: Option<&str>) -> String {
+    let bridge = shell_quote(hook_bridge_path);
     match board {
-        Some(id) => format!("{hook_bridge_path} {arg} --board {id}"),
-        None => format!("{hook_bridge_path} {arg}"),
+        Some(id) => format!("{bridge} {arg} --board {id}"),
+        None => format!("{bridge} {arg}"),
+    }
+}
+
+/// Repairs entries written by earlier versions, which registered the path
+/// unquoted — `sh` split it at the space in `Application Support`, so the hook
+/// exited 127 and taisk never saw the session.
+fn requote_legacy(settings: &mut Value, hook_bridge_path: &str) {
+    let quoted = shell_quote(hook_bridge_path);
+    if quoted == hook_bridge_path {
+        return;
+    }
+    let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else { return };
+    for (_event, groups) in hooks.iter_mut() {
+        let Some(groups) = groups.as_array_mut() else { continue };
+        for group in groups {
+            let Some(hs) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) else { continue };
+            for h in hs {
+                let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else { continue };
+                if let Some(rest) = cmd.strip_prefix(hook_bridge_path) {
+                    h["command"] = Value::String(format!("{quoted}{rest}"));
+                }
+            }
+        }
     }
 }
 
 fn is_ours(entry_command: &str, hook_bridge_path: &str) -> bool {
-    entry_command.contains(hook_bridge_path)
+    entry_command.contains(hook_bridge_path) || entry_command.contains(&shell_quote(hook_bridge_path))
 }
 
 /// Removes hook-bridge entries whose binary no longer exists on disk (a
@@ -51,7 +111,8 @@ pub fn prune_dead_hooks(settings: &mut Value) {
             if let Some(hs) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
                 hs.retain(|h| {
                     let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else { return true };
-                    let bin = cmd.split_whitespace().next().unwrap_or("");
+                    let bin_owned = program_of(cmd);
+                    let bin = bin_owned.as_str();
                     let is_bridge = std::path::Path::new(bin).file_name().is_some_and(|n| n == "hook-bridge");
                     !(is_bridge && std::path::Path::new(bin).is_absolute() && !std::path::Path::new(bin).exists())
                 });
@@ -82,7 +143,8 @@ pub fn merge_hooks_for_board(settings: &mut Value, hook_bridge_path: &str, board
     if !hooks.is_object() {
         *hooks = json!({});
     }
-    let hooks = hooks.as_object_mut().unwrap();
+    requote_legacy(settings, hook_bridge_path);
+    let hooks = settings["hooks"].as_object_mut().unwrap();
 
     for (event_key, arg) in HOOK_EVENTS {
         let matcher_groups = hooks.entry(*event_key).or_insert_with(|| json!([]));
@@ -193,6 +255,33 @@ mod tests {
     use super::*;
 
     const BRIDGE: &str = "/Applications/taisk.app/Contents/Resources/hook-bridge";
+
+    const SPACED: &str = "/Users/x/Library/Application Support/taisk/bin/hook-bridge";
+
+    #[test]
+    fn path_with_a_space_is_quoted_so_sh_can_run_it() {
+        let mut settings = json!({});
+        merge_hooks(&mut settings, SPACED);
+        let cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(cmd, format!("'{SPACED}' session-start"));
+        assert_eq!(program_of(cmd), SPACED);
+        let out = std::process::Command::new("sh").arg("-c").arg(format!("printf %s {}", shell_quote(SPACED))).output().unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), SPACED);
+    }
+
+    #[test]
+    fn legacy_unquoted_entries_are_repaired_in_place_without_duplicating() {
+        let mut settings = json!({"hooks": {"SessionStart": [
+            {"matcher": "", "hooks": [{"type": "command", "command": format!("{SPACED} session-start --board work")}]}
+        ]}});
+        merge_hooks(&mut settings, SPACED);
+        let groups = settings["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["hooks"][0]["command"], format!("'{SPACED}' session-start --board work"));
+        let again = settings.clone();
+        merge_hooks(&mut settings, SPACED);
+        assert_eq!(settings, again);
+    }
 
     #[test]
     fn empty_settings_gets_all_events_added() {
