@@ -26,6 +26,27 @@ use tokio::sync::broadcast;
 pub type PtyId = String;
 
 /// Bytes of recent output kept per PTY for instant replay on (re)attach.
+/// Session-scoped variables of whatever Claude Code session (or taisk task
+/// launch) started this app. Inherited by a pty `claude` they do real harm:
+/// `CLAUDE_CODE_CHILD_SESSION` turns transcript saving off, so the session
+/// never surfaces on the board and is never filed under its task; a stale
+/// `SESSIONBOARD_TASK_ID` would file it under the wrong one. User config
+/// (`CLAUDE_CONFIG_DIR`, provider keys, ...) is deliberately kept.
+const INHERITED_SESSION_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "SESSIONBOARD_TASK_ID",
+    "SESSIONBOARD_PTY_ID",
+];
+
 const SCROLLBACK_CAP: usize = 256 * 1024;
 
 const DEFAULT_SIZE: PtySize = PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 };
@@ -143,6 +164,9 @@ impl TerminalManager {
         let mut cmd = CommandBuilder::new(&spec.program);
         cmd.args(&spec.args);
         cmd.cwd(&spec.cwd);
+        for k in INHERITED_SESSION_ENV {
+            cmd.env_remove(k);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("PATH", augmented_path(std::env::var("PATH").ok()));
@@ -359,6 +383,18 @@ mod tests {
         let mut rx = sub.rx;
         let out = collect_until(&mut rx, sub.scrollback, |b| contains(b, "task=t42")).await;
         assert!(contains(&out, &format!("pid={id}")));
+    }
+
+    #[tokio::test]
+    async fn spawn_scrubs_session_env_inherited_from_a_parent_claude_session() {
+        std::env::set_var("CLAUDE_CODE_CHILD_SESSION", "1");
+        std::env::set_var("SESSIONBOARD_TASK_ID", "stale");
+        let tm = TerminalManager::new();
+        let id = tm.spawn(sh(r#"printf "child=[%s] task=[%s] end" "$CLAUDE_CODE_CHILD_SESSION" "$SESSIONBOARD_TASK_ID""#)).unwrap();
+        let sub = tm.subscribe(&id).unwrap();
+        let mut rx = sub.rx;
+        let out = collect_until(&mut rx, sub.scrollback, |b| contains(b, " end")).await;
+        assert!(contains(&out, "child=[] task=[] end"), "{}", String::from_utf8_lossy(&out));
     }
 
     #[tokio::test]
