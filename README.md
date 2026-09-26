@@ -83,17 +83,59 @@ taisk is a native macOS app (Tauri). It relies on macOS APIs, so macOS is the su
 
 ### Homebrew (recommended)
 
+Works on Apple Silicon and Intel Macs running macOS 12 or later.
+
+**1. Install the prerequisites** (skip any you already have)
+
+```bash
+brew install --cask ollama-app      # local models; or download from ollama.com
+```
+
+[Claude Code](https://claude.com/claude-code) must be installed too. It's the thing taisk watches.
+
+**2. Install taisk**
+
 ```bash
 brew install --cask omrico94/taisk/taisk
 ```
 
-This installs the app. taisk also needs [Ollama](https://ollama.com) (`brew install --cask ollama-app`, skip if you already have it). Then pull the two small models it uses:
+That taps `omrico94/homebrew-taisk` and installs `taisk.app` into `/Applications`. The app isn't notarized yet, so the cask clears macOS's quarantine flag for you.
+
+**3. Pull the two small models taisk uses**
 
 ```bash
 ollama pull nomic-embed-text && ollama pull qwen2.5:1.5b
 ```
 
-You also need [Claude Code](https://claude.com/claude-code). Uninstall with `brew uninstall --cask --zap taisk`.
+**4. Launch it**
+
+Open **taisk** from Spotlight or `/Applications`. On first launch it registers its hooks in `~/.claude/settings.json` and creates `~/Library/Application Support/taisk/`. Then start `claude` in any terminal and the session appears on the board. See the [60-second walkthrough](#3-a-60-second-walkthrough).
+
+**Update**
+
+```bash
+brew update && brew upgrade --cask taisk
+```
+
+Your tasks and settings are kept, and the hooks keep working across updates.
+
+**Uninstall**
+
+```bash
+brew uninstall --cask taisk          # removes the app, keeps your tasks and history
+brew uninstall --cask --zap taisk    # also deletes ~/Library/Application Support/taisk (tasks, search index)
+```
+
+taisk's hooks stay in `~/.claude/settings.json` after uninstalling. They fail silently, but you can remove any entries whose command contains `taisk/bin/hook-bridge`.
+
+**Troubleshooting**
+
+| Symptom | Fix |
+|---|---|
+| macOS says the app "can't be opened" | Right-click taisk in `/Applications` → **Open** once, or run `xattr -cr /Applications/taisk.app` |
+| `brew` can't find the cask | Run `brew update`, or `brew tap omrico94/taisk` first |
+| Sessions show up with crude titles | Ollama isn't running or the two models aren't pulled (step 3) |
+| A session never appears | It must have sent at least one prompt, and taisk must have been launched at least once so its hooks are registered |
 
 ### Build from source
 
