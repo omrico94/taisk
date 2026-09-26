@@ -87,7 +87,7 @@ taisk is a native macOS app (Tauri). It relies on macOS APIs, so macOS is the su
 brew install --cask omrico94/taisk/taisk
 ```
 
-This installs the app and [Ollama](https://ollama.com). On first launch, pull the two small models taisk uses:
+This installs the app. taisk also needs [Ollama](https://ollama.com) (`brew install --cask ollama-app`, skip if you already have it). Then pull the two small models it uses:
 
 ```bash
 ollama pull nomic-embed-text && ollama pull qwen2.5:1.5b
