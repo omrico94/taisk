@@ -16,8 +16,12 @@ if [ "$target" = "universal-apple-darwin" ]; then
   rustup target add aarch64-apple-darwin x86_64-apple-darwin >&2
   a=$(build aarch64-apple-darwin)
   x=$(build x86_64-apple-darwin)
+  # Tauri builds each arch separately (needs per-arch names) and then merges
+  # them (needs the universal name), so provide all three.
+  cp "$a" binaries/hook-bridge-aarch64-apple-darwin
+  cp "$x" binaries/hook-bridge-x86_64-apple-darwin
   lipo -create "$a" "$x" -output "binaries/hook-bridge-$target"
 else
   cp "$(build "$target")" "binaries/hook-bridge-$target"
 fi
-echo "wrote src-tauri/binaries/hook-bridge-$target"
+ls binaries | sed "s|^|wrote src-tauri/binaries/|"
