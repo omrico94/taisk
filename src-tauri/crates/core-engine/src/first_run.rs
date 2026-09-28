@@ -104,6 +104,60 @@ pub fn register_hooks(hook_bridge_path: &str) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// The file Claude Code itself writes `hasTrustDialogAccepted` into for the
+/// *default* config dir: `~/.claude.json`, a **sibling** of `~/.claude`, not
+/// a file inside it (confirmed against this project's own real file layout).
+/// A named board's own `<config_dir>/.claude.json` lives inside its config
+/// dir instead (also confirmed against a real board's on-disk layout) — see
+/// `trust_config_path_for` at the call site in `api.rs`.
+pub fn claude_user_config_path() -> PathBuf {
+    dirs::home_dir().unwrap_or_default().join(".claude.json")
+}
+
+/// Pre-approves Claude Code's interactive "do you trust this folder?" dialog
+/// for `cwd`, so a `claude` process taisk spawns programmatically (a "start
+/// new session from a task" launch, or resuming one) doesn't sit blocked on
+/// a prompt the embedded terminal panel makes easy to miss. Live-reproduced:
+/// the dialog defaults to focus on "No, exit", so a stray Enter (or the user
+/// just typing their actual message before noticing the prompt) kills the
+/// process before it ever writes a real transcript line — the session then
+/// never surfaces on the board at all, let alone gets filed under its task.
+/// There's nothing left for the user to decide here anyway: starting a
+/// session in `cwd` via taisk's own UI *is* the trust decision.
+///
+/// Mirrors exactly what Claude Code itself writes when a user answers "Yes"
+/// by hand: a `projects.<cwd>.hasTrustDialogAccepted: true` entry in
+/// `config_path`. Merges rather than overwrites so any other fields Claude
+/// Code has already recorded for this project (`allowedTools`,
+/// `mcpContextUris`, history, ...) survive untouched, and is safe to call on
+/// every launch (idempotent, same as `settings_merge`).
+pub fn trust_project_dir(config_path: &Path, cwd: &str) -> std::io::Result<()> {
+    let mut root: serde_json::Value = std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    let root_obj = root.as_object_mut().unwrap();
+    let projects = root_obj.entry("projects").or_insert_with(|| serde_json::json!({}));
+    if !projects.is_object() {
+        *projects = serde_json::json!({});
+    }
+    let project_entry = projects.as_object_mut().unwrap().entry(cwd.to_string()).or_insert_with(|| serde_json::json!({}));
+    if !project_entry.is_object() {
+        *project_entry = serde_json::json!({});
+    }
+    project_entry.as_object_mut().unwrap().insert("hasTrustDialogAccepted".to_string(), serde_json::Value::Bool(true));
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = config_path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&root)?)?;
+    std::fs::rename(&tmp, config_path)
+}
+
 /// Registers our hooks into `board`'s own `<config_dir>/settings.json`. The
 /// default board keeps the bare command (so existing `~/.claude` entries need
 /// no migration); every other board tags its events with `--board <id>`.
@@ -228,6 +282,53 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(value["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn trust_project_dir_creates_the_entry_on_a_fresh_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        trust_project_dir(&path, "/Users/omricohen/some-project").unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["projects"]["/Users/omricohen/some-project"]["hasTrustDialogAccepted"], true);
+    }
+
+    #[test]
+    fn trust_project_dir_merges_without_disturbing_other_fields_or_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "projects": {
+                    "/Users/omricohen/some-project": {"allowedTools": ["Bash"], "hasTrustDialogAccepted": false},
+                    "/Users/omricohen/other-project": {"hasTrustDialogAccepted": true},
+                },
+                "userID": "keep-me",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        trust_project_dir(&path, "/Users/omricohen/some-project").unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["projects"]["/Users/omricohen/some-project"]["hasTrustDialogAccepted"], true);
+        assert_eq!(value["projects"]["/Users/omricohen/some-project"]["allowedTools"], serde_json::json!(["Bash"]));
+        assert_eq!(value["projects"]["/Users/omricohen/other-project"]["hasTrustDialogAccepted"], true);
+        assert_eq!(value["userID"], "keep-me");
+    }
+
+    #[test]
+    fn trust_project_dir_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        trust_project_dir(&path, "/Users/omricohen/some-project").unwrap();
+        trust_project_dir(&path, "/Users/omricohen/some-project").unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["projects"].as_object().unwrap().len(), 1);
     }
 
     #[tokio::test]
