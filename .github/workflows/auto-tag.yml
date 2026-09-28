@@ -1,0 +1,55 @@
+name: auto-tag-release
+
+# Cuts a new patch release automatically whenever `main` moves (a PR merge,
+# or a direct push). Deliberately a separate workflow from release.yml
+# rather than an extra trigger on it: release.yml stays exactly what it was
+# (build+publish on any `v*` tag, so a manual `git tag && git push` still
+# works untouched), and this one's only job is deciding *whether* a new tag
+# should exist and pushing it — pushing that tag is what actually fires
+# release.yml.
+#
+# That push has to be authenticated as a real token (HOMEBREW_TAP_TOKEN, a
+# PAT — see release.yml's update-homebrew-tap job for what it needs), not
+# the default GITHUB_TOKEN: GitHub deliberately does not let a GITHUB_TOKEN-
+# authored push trigger further workflow runs (loop prevention), so pushing
+# the tag with the default token would silently produce a tag with no build
+# ever attached to it.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    # An escape hatch for CI-only/docs-only changes that don't warrant a
+    # release (e.g. this workflow file's own introduction) — put
+    # "[skip release]" anywhere in the merge/push's HEAD commit message.
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next patch version
+        id: next
+        run: |
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          latest=${latest:-v0.0.0}
+          IFS='.' read -r major minor patch <<< "${latest#v}"
+          next="v${major}.${minor}.$((patch + 1))"
+          echo "Latest tag: $latest -> next: $next"
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Push the release tag
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          git config user.name "taisk-release-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
