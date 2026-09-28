@@ -1,7 +1,28 @@
 name: release
 
+# Two ways in:
+#  - push to `main` (a merged PR, or a direct push) - the normal path, cuts
+#    the next patch release automatically.
+#  - push of a `v*` tag - manual/one-off (e.g. re-cutting an old version).
+#
+# These deliberately share one workflow rather than living in a separate
+# auto-tag workflow that pushes a tag to re-trigger this one: GitHub Actions
+# caches (see Swatinem/rust-cache below) are scoped per git ref, and only
+# ever fall back across refs to the *default branch*'s cache. Every past
+# release ran on its own one-shot tag (v0.1.0, v0.1.1, ...), which is a ref
+# that never repeats - so every single one built the entire LanceDB/
+# DataFusion/Arrow dependency tree from nothing, twice (once per
+# architecture), because there was no default-branch cache for a tag build
+# to ever fall back to (confirmed: the cache each of those runs saved sat
+# under `refs/tags/vX.Y.Z` and was never restorable by anything). Running
+# the automatic path on `main` itself means its cache *is* the default-
+# branch cache, so it warms up over time and every later run - including a
+# rare manual tag build - can actually use it. This is the fix; there was no
+# slow build setting to tune (LTO is already off, codegen-units already
+# default).
 on:
   push:
+    branches: [main]
     tags: ["v*"]
 
 permissions:
@@ -10,11 +31,20 @@ permissions:
 jobs:
   build:
     runs-on: macos-14
+    # Escape hatch for a CI/docs-only push that doesn't warrant a release -
+    # put "[skip release]" anywhere in the triggering commit message (for a
+    # squash or merge commit, that's the PR title/body).
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
     outputs:
       version: ${{ steps.pkg.outputs.version }}
       sha256: ${{ steps.pkg.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the `main`-push path below needs to see
+          # every existing `v*` tag to compute the next one. The default
+          # shallow checkout (fetch-depth: 1) fetches no tags at all.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -34,6 +64,18 @@ jobs:
 
       - run: npm ci
 
+      - name: Compute the version to release
+        id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+            latest=${latest:-v0.0.0}
+            IFS='.' read -r major minor patch <<< "${latest#v}"
+            echo "version=${major}.${minor}.$((patch + 1))" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build hook-bridge (universal)
         run: scripts/prepare-hook-bridge.sh universal-apple-darwin
 
@@ -47,7 +89,7 @@ jobs:
       - name: Name the artifact and hash it
         id: pkg
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${{ steps.ver.outputs.version }}"
           src=$(ls src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -1)
           dest="taisk_${version}_universal.dmg"
           cp "$src" "$dest"
@@ -58,6 +100,10 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # Creates the tag (pointing at this commit) when triggered from
+          # `main`, where it doesn't exist yet; a no-op tag match when
+          # triggered from an actual tag push.
+          tag_name: v${{ steps.pkg.outputs.version }}
           files: |
             ${{ steps.pkg.outputs.dmg }}
             ${{ steps.pkg.outputs.dmg }}.sha256
@@ -70,8 +116,8 @@ jobs:
   # Homebrew: the fix landing on `main`/being tagged here doesn't reach them
   # until this cask file changes too). Needs its own cross-repo token
   # (`HOMEBREW_TAP_TOKEN`, a fine-grained PAT with Contents: Read & write on
-  # both this repo and homebrew-taisk) since the default GITHUB_TOKEN is
-  # scoped to the repo the workflow runs in and can't push to another one.
+  # homebrew-taisk) since the default GITHUB_TOKEN is scoped to the repo the
+  # workflow runs in and can't push to another one.
   update-homebrew-tap:
     needs: build
     runs-on: ubuntu-latest
