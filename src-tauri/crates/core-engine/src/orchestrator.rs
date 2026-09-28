@@ -562,6 +562,22 @@ pub async fn run(
     tasks: TaskHub,
     terminal: TerminalManager,
 ) {
+    // Bind the hook socket and start accepting connections *before* the
+    // reconstruction below. `bootstrap::start` has already registered our
+    // hooks into `~/.claude/settings.json` by the time `run` is called, so
+    // Claude Code will happily invoke `hook-bridge` for any session started
+    // while this process is still starting up — but `hook-bridge` fails
+    // silently and fast if it can't connect (by design: a broken hook must
+    // never block the user's real session), and `session-start` fires
+    // exactly once with no retry (see this module's doc comment). Binding
+    // late meant any session started during a slow `reconstruct_live_sessions`
+    // (a full LanceDB scan) had its `session-start` dropped and was never
+    // surfaced on the board, ever — a real, reported bug, not a hypothetical
+    // one. The channel buffers events that arrive before the loop below
+    // starts draining it, so nothing sent after this point is lost.
+    let (tx, mut rx) = mpsc::channel::<HookEvent>(256);
+    tokio::spawn(hook_socket::listen_at(orch_config.socket_path.clone(), tx));
+
     let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
     reconstruct_live_sessions(
         &engine,
@@ -579,9 +595,6 @@ pub async fn run(
         orch_config.done_ttl,
         orch_config.idle_sweep_interval,
     ));
-
-    let (tx, mut rx) = mpsc::channel::<HookEvent>(256);
-    tokio::spawn(hook_socket::listen_at(orch_config.socket_path.clone(), tx));
 
     let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
 

@@ -151,10 +151,12 @@ async fn open_session_terminal(
         .find(|s| s.id == session_id)
         .ok_or(StatusCode::NOT_FOUND)?;
     let env = board_env(&state, &session.board);
+    let cwd = usable_cwd(Some(session.cwd));
+    trust_project_dir(&state, &session.board, &cwd);
     let pty_id = state
         .terminal
         .spawn(SpawnSpec {
-            cwd: usable_cwd(Some(session.cwd)),
+            cwd,
             program: state.claude_bin.clone(),
             args: vec!["--resume".into(), session_id.clone()],
             env,
@@ -189,13 +191,14 @@ async fn open_task_terminal(
         .into_iter()
         .find(|t| t.id == task_id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    let cwd = body.and_then(|Json(b)| b.cwd);
+    let cwd = usable_cwd(body.and_then(|Json(b)| b.cwd));
     let mut env = board_env(&state, &task.board);
     env.push(("SESSIONBOARD_TASK_ID".to_string(), task_id.clone()));
+    trust_project_dir(&state, &task.board, &cwd);
     let pty_id = state
         .terminal
         .spawn(SpawnSpec {
-            cwd: usable_cwd(cwd),
+            cwd,
             program: state.claude_bin.clone(),
             args: vec![],
             env,
@@ -218,6 +221,28 @@ fn board_env(state: &AppState, board: &str) -> Vec<(String, String)> {
             vec![("CLAUDE_CONFIG_DIR".to_string(), b.config_dir.to_string_lossy().to_string())]
         }
         _ => vec![],
+    }
+}
+
+/// Pre-approves Claude Code's "do you trust this folder?" dialog for `cwd`
+/// before taisk spawns a `claude` process into it, in whichever board's
+/// config dir that process will actually read from (`board_env` above picks
+/// the same one via `CLAUDE_CONFIG_DIR`). A named board's own config dir
+/// keeps its trust store *inside* itself (`<config_dir>/.claude.json`,
+/// confirmed against a real board's on-disk layout); the default board's
+/// lives *outside* `~/.claude`, as the sibling `~/.claude.json` (also
+/// confirmed against this project's own layout) — see
+/// `first_run::claude_user_config_path`'s doc comment. Best-effort: a
+/// failure here just means the user sees the normal interactive prompt
+/// instead of a silently-abandoned session, so it's logged and swallowed
+/// rather than failing the terminal launch over it.
+fn trust_project_dir(state: &AppState, board: &str, cwd: &str) {
+    let path = match state.boards.get(board) {
+        Some(b) if b.id != DEFAULT_BOARD_ID => b.config_dir.join(".claude.json"),
+        _ => crate::first_run::claude_user_config_path(),
+    };
+    if let Err(e) = crate::first_run::trust_project_dir(&path, cwd) {
+        eprintln!("failed to pre-trust {cwd} in {path:?}: {e}");
     }
 }
 
