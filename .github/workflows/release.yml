@@ -10,6 +10,9 @@ permissions:
 jobs:
   build:
     runs-on: macos-14
+    outputs:
+      version: ${{ steps.pkg.outputs.version }}
+      sha256: ${{ steps.pkg.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +53,8 @@ jobs:
           cp "$src" "$dest"
           shasum -a 256 "$dest" | tee "$dest.sha256"
           echo "dmg=$dest" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "$dest" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -57,3 +62,34 @@ jobs:
             ${{ steps.pkg.outputs.dmg }}
             ${{ steps.pkg.outputs.dmg }}.sha256
           generate_release_notes: true
+
+  # Keeps the Homebrew tap in lockstep with every release this workflow
+  # publishes — otherwise `brew install taisk` silently stays pinned to
+  # whatever version was last hand-bumped in homebrew-taisk (this is exactly
+  # how the "fixed" bugs from v0.1.3 would have kept shipping to anyone on
+  # Homebrew: the fix landing on `main`/being tagged here doesn't reach them
+  # until this cask file changes too). Needs its own cross-repo token
+  # (`HOMEBREW_TAP_TOKEN`, a fine-grained PAT with Contents: Read & write on
+  # both this repo and homebrew-taisk) since the default GITHUB_TOKEN is
+  # scoped to the repo the workflow runs in and can't push to another one.
+  update-homebrew-tap:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: omrico94/homebrew-taisk
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Bump cask version and sha256
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          sed -i "s/version \"[^\"]*\"/version \"${VERSION}\"/" Casks/taisk.rb
+          sed -i "s/sha256 \"[^\"]*\"/sha256 \"${SHA256}\"/" Casks/taisk.rb
+          git config user.name "taisk-release-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git diff --quiet Casks/taisk.rb && exit 0
+          git commit -am "taisk ${VERSION}"
+          git push
