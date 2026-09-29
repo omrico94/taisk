@@ -62,6 +62,9 @@ export interface Task {
   created_at_ms: number;
   /** Board this task lives on. */
   board: string;
+  /** Attached directories: a session started from the task runs in the first
+   *  and gets the rest via `claude --add-dir`. */
+  directories: string[];
 }
 
 /** session id → task id. A session absent from the map is unassigned. */

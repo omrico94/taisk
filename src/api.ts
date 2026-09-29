@@ -68,6 +68,20 @@ export async function updateTask(id: string, patch: { title?: string; stage?: St
   });
 }
 
+/** Replaces the task's attached directories. Throws with the backend's message
+ *  (e.g. "… is not an existing directory") so the editor can show it. */
+export async function setTaskDirectories(id: string, directories: string[]): Promise<void> {
+  const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ directories }),
+  });
+  if (!resp.ok) {
+    const body = (await resp.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `Failed to update directories (${resp.status})`);
+  }
+}
+
 /** Its sessions become unassigned (they return to the tray). */
 export async function deleteTask(id: string): Promise<void> {
   await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });

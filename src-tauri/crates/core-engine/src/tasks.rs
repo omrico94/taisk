@@ -47,6 +47,11 @@ pub struct Task {
     /// existed deserialize to the default board.
     #[serde(default = "default_board")]
     pub board: String,
+    /// Directories a session started from this task works in: the first is
+    /// the new `claude` process's cwd, the rest are passed as `--add-dir`.
+    /// Absolute paths; empty means "fall back to the last session's cwd".
+    #[serde(default)]
+    pub directories: Vec<String>,
 }
 
 fn default_board() -> String {
@@ -114,7 +119,7 @@ impl TaskStore {
         if title.is_empty() {
             return None;
         }
-        let task = Task { id: new_task_id(), title: title.to_string(), stage, created_at_ms: crate::now_ms(), board: board.to_string() };
+        let task = Task { id: new_task_id(), title: title.to_string(), stage, created_at_ms: crate::now_ms(), board: board.to_string(), directories: vec![] };
         self.data.tasks.push(task.clone());
         Some(task)
     }
@@ -131,6 +136,16 @@ impl TaskStore {
         if let Some(s) = stage {
             task.stage = s;
         }
+        true
+    }
+
+    /// Replaces the task's attached directories. Returns whether the task
+    /// exists. Callers validate/normalize the paths (see `api::update_task`).
+    pub fn set_directories(&mut self, id: &str, directories: Vec<String>) -> bool {
+        let Some(task) = self.data.tasks.iter_mut().find(|t| t.id == id) else {
+            return false;
+        };
+        task.directories = directories;
         true
     }
 
@@ -313,6 +328,14 @@ impl TaskHub {
         .await
     }
 
+    pub async fn set_directories(&self, id: &str, directories: Vec<String>) -> bool {
+        self.mutate(|s| {
+            let ok = s.set_directories(id, directories);
+            (ok, ok)
+        })
+        .await
+    }
+
     pub async fn delete(&self, id: &str) -> bool {
         self.mutate(|s| {
             let ok = s.delete(id);
@@ -443,6 +466,19 @@ mod tests {
         assert_eq!(snap.tasks[0].title, "A");
         assert_eq!(snap.tasks[0].stage, Stage::Done);
         assert!(!s.update("missing", None, Some(Stage::Done)));
+    }
+
+    #[test]
+    fn directories_persist_and_old_tasks_load_without_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        std::fs::write(&path, r#"{"tasks":[{"id":"t1","title":"A","stage":"todo","created_at_ms":0}],"assignments":{}}"#).unwrap();
+        let mut s = TaskStore::load(&path);
+        assert!(s.snapshot().tasks[0].directories.is_empty());
+        assert!(s.set_directories("t1", vec!["/a".into(), "/b".into()]));
+        assert!(!s.set_directories("missing", vec![]));
+        s.save().unwrap();
+        assert_eq!(TaskStore::load(&path).snapshot().tasks[0].directories, vec!["/a", "/b"]);
     }
 
     #[test]
