@@ -650,7 +650,7 @@ async fn assign_when_visible(engine: EngineHandle, tasks: TaskHub, session_id: S
     while tokio::time::Instant::now() < deadline {
         let sessions = engine.snapshot().await;
         if sessions.iter().any(|s| s.id == session_id) {
-            tasks.assign(&session_id, Some(&task_id), &sessions).await;
+            tasks.assign(&session_id, Some(&task_id)).await;
             return;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;

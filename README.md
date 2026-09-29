@@ -205,7 +205,7 @@ flowchart LR
 
     subgraph Engine["core-engine (Rust, inside the app)"]
         ORCH["orchestrator<br/>hook → event"] --> SM["state machine<br/>single-owner actor"]
-        SM --> TASKS["TaskHub<br/>tasks.json + rollup"]
+        SM --> TASKS["TaskHub<br/>tasks.json"]
         ORCH --> SUM["summarize"]
         SUM <--> OLL["Ollama<br/>(local)"]
         SUM --> LDB[("LanceDB<br/>memories")]
@@ -224,7 +224,7 @@ flowchart LR
 1. **Hook fires.** taisk registers Claude Code hooks (`SessionStart`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Notification`, `Stop`, `SessionEnd`). Each invokes `hook-bridge`, which reads the payload from stdin, writes it to a Unix socket, and exits in milliseconds. It fails silently if the app isn't running, so it can never break a real session.
 2. **Orchestrator** maps the hook to a `SessionEvent`. On `session-start` it waits for the transcript, extracts the first prompt, then asks Ollama for a title and summary *off the critical path* — the card shows up as "Starting…" immediately.
 3. **State machine.** One tokio actor owns every live session. Every mutation goes through a single `transition(state, event)` function (table-tested for every pair) and broadcasts a diff. No shared mutexes, no scattered "just set it to Working here too".
-4. **Tasks.** `TaskHub` persists tasks and session→task assignments and owns the *Done* rollup. Assignment is always an explicit user action — never inferred.
+4. **Tasks.** `TaskHub` persists tasks and session→task assignments. Task stages change only when the user moves a task. Assignment is always an explicit user action — never inferred.
 5. **API.** An axum server on `127.0.0.1:37888` exposes REST (`/sessions`, `/tasks`, `/search`, approve/reject/reply) plus a WebSocket that streams session diffs and task snapshots.
 6. **UI.** A React + Zustand app subscribes to the WebSocket, with polling as a safety net for the packaged webview.
 

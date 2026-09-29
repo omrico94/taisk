@@ -9,11 +9,8 @@
 //! broadcasts a full `TasksSnapshot` on every change (tiny payload) so the
 //! WS layer can keep every open frontend in sync.
 //!
-//! Rollup ("the task follows its sessions") is backend-owned and
-//! edge-triggered: a task moves to `Done` at the moment its sessions *become*
-//! all settled, and back to `InProgress` at the moment a settled task gets a
-//! live session again. Edge-triggering (rather than re-asserting "all done ⇒
-//! Done" on every diff) keeps a manual drag out of `Done` from bouncing back.
+//! A task's stage is changed only by the user (drag or menu) — session state
+//! never moves a task between columns.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,8 +20,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::engine::{EngineHandle, SessionId, SessionView};
-use crate::state::SessionState;
+use crate::engine::SessionId;
 
 pub type TaskId = String;
 
@@ -63,9 +59,6 @@ pub struct TasksSnapshot {
 pub struct TaskStore {
     path: PathBuf,
     data: TasksSnapshot,
-    /// Last observed "all assigned sessions settled" per task, for the
-    /// edge-triggered rollup. Deliberately not persisted (see `rollup`).
-    settled: HashMap<TaskId, bool>,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -74,20 +67,13 @@ fn new_task_id() -> TaskId {
     format!("t{:x}{:x}", crate::now_ms(), NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-/// A session counts as "settled" (no more work expected from it right now)
-/// when it is Done or Idle. Working and Waiting are both *unsettled*:
-/// Waiting means blocked on the user, so the task is not finished.
-fn is_settled(state: SessionState) -> bool {
-    matches!(state, SessionState::Done | SessionState::Idle)
-}
-
 impl TaskStore {
     pub fn load(path: &Path) -> Self {
         let data = std::fs::read_to_string(path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
-        Self { path: path.to_path_buf(), data, settled: HashMap::new() }
+        Self { path: path.to_path_buf(), data }
     }
 
     pub fn snapshot(&self) -> TasksSnapshot {
@@ -139,7 +125,6 @@ impl TaskStore {
         let before = self.data.tasks.len();
         self.data.tasks.retain(|t| t.id != id);
         self.data.assignments.retain(|_, task_id| task_id != id);
-        self.settled.remove(id);
         self.data.tasks.len() != before
     }
 
@@ -172,73 +157,6 @@ impl TaskStore {
 
     pub fn unassign_session(&mut self, session_id: &str) -> bool {
         self.data.assignments.remove(session_id).is_some()
-    }
-
-    /// Applies the rollup rule against the current live sessions. Returns
-    /// whether any task's stage changed.
-    ///
-    /// A task with no live member sessions has no rollup signal (its cached
-    /// state is forgotten), so after a restart — when reconstruction
-    /// re-adds sessions gradually — the first observation of a task only
-    /// *records* its state and never moves it, except that a `Done` task
-    /// which turns out to have a live session is pulled back to `InProgress`.
-    pub fn rollup(&mut self, sessions: &[SessionView]) -> bool {
-        // Index live sessions by id so member lookup below is O(1).
-        let by_id: HashMap<&str, &SessionView> = sessions.iter().map(|s| (s.id.as_str(), s)).collect();
-        let mut changed = false;
-        for task in &mut self.data.tasks {
-            // Collect this task's member sessions: every assignment pointing
-            // at the task whose session is currently live on the board.
-            let members: Vec<&SessionView> = self
-                .data
-                .assignments
-                .iter()
-                .filter(|(_, tid)| **tid == task.id)
-                .filter_map(|(sid, _)| by_id.get(sid.as_str()).copied())
-                .collect();
-            // No live members -> no signal. Forget the cached state so the
-            // next observation is treated as a first look, and leave the
-            // task's stage exactly where the user (or last rollup) put it.
-            if members.is_empty() {
-                self.settled.remove(&task.id);
-                continue;
-            }
-            // The task is "settled" only when *every* member session is.
-            // One still-working (or waiting) session keeps it unsettled.
-            let settled = members.iter().all(|s| is_settled(s.state));
-            // Remember this observation and get back the previous one; the
-            // stage only moves on a *change* (edge), never on a steady state.
-            // That way a user who manually drags a task to another column
-            // isn't overridden on every diff while sessions stay unchanged.
-            let prev = self.settled.insert(task.id.clone(), settled);
-            let target = match prev {
-                // Edge: the settled status flipped since the last look.
-                Some(p) if p != settled => {
-                    if settled && task.stage != Stage::Done {
-                        // Working -> all settled: auto-move In Progress -> Done.
-                        Some(Stage::Done)
-                    } else if !settled && task.stage == Stage::Done {
-                        // A session woke back up: pull Done back to In Progress.
-                        Some(Stage::InProgress)
-                    } else {
-                        None
-                    }
-                }
-                // First observation (e.g. right after a restart): never
-                // auto-complete, since sessions are re-added gradually and
-                // "all settled" may just mean "not all loaded yet". Only
-                // correct the one clearly wrong case: a Done task with a
-                // live, unsettled session.
-                None if !settled && task.stage == Stage::Done => Some(Stage::InProgress),
-                // Steady state: leave the stage alone.
-                _ => None,
-            };
-            if let Some(stage) = target {
-                task.stage = stage;
-                changed = true;
-            }
-        }
-        changed
     }
 }
 
@@ -321,15 +239,10 @@ impl TaskHub {
         .await
     }
 
-    /// Assigns/unassigns, then re-runs the rollup against `sessions` so
-    /// (for example) dropping a live session onto a Done task pulls it back
-    /// to In Progress in the same broadcast.
-    pub async fn assign(&self, session_id: &str, task_id: Option<&str>, sessions: &[SessionView]) -> bool {
+    /// Assigns/unassigns. Never changes the task's stage.
+    pub async fn assign(&self, session_id: &str, task_id: Option<&str>) -> bool {
         self.mutate(|s| {
             let ok = s.assign(session_id, task_id);
-            if ok {
-                s.rollup(sessions);
-            }
             (ok, ok)
         })
         .await
@@ -343,43 +256,11 @@ impl TaskHub {
         })
         .await
     }
-
-    pub async fn rollup(&self, sessions: &[SessionView]) {
-        self.mutate(|s| {
-            let changed = s.rollup(sessions);
-            ((), changed)
-        })
-        .await
-    }
-}
-
-/// Keeps task stages following their sessions: on every engine diff, re-runs
-/// the rollup against a fresh snapshot. Spawned once from `bootstrap::start`.
-pub async fn run_rollup(hub: TaskHub, engine: EngineHandle) {
-    let mut rx = engine.subscribe();
-    loop {
-        match rx.recv().await {
-            // The diff's contents are ignored on purpose: we re-read a full
-            // snapshot instead. A lagged receiver (missed diffs) is handled
-            // the same way, since the snapshot is the source of truth.
-            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                let sessions = engine.snapshot().await;
-                hub.rollup(&sessions).await;
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn session(id: &str, state: SessionState) -> SessionView {
-        let mut s = SessionView::new_starting(id.into(), "proj".into(), "/tmp".into(), "cli".into(), 0);
-        s.state = state;
-        s
-    }
 
     fn store() -> (TaskStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -446,68 +327,11 @@ mod tests {
     }
 
     #[test]
-    fn rollup_moves_task_to_done_when_all_sessions_settle_and_back_when_revived() {
-        let (mut s, _d) = store();
-        let t = s.create("A", Stage::InProgress).unwrap();
-        s.assign("s1", Some(&t.id));
-        s.assign("s2", Some(&t.id));
-
-        // First observation only records.
-        assert!(!s.rollup(&[session("s1", SessionState::Working), session("s2", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, Stage::InProgress);
-
-        // Working -> Done edge: task advances.
-        assert!(s.rollup(&[session("s1", SessionState::Done), session("s2", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, Stage::Done);
-
-        // Idle counts as settled: no change.
-        assert!(!s.rollup(&[session("s1", SessionState::Idle), session("s2", SessionState::Done)]));
-
-        // A settled Done task gets a live session again: pulled back.
-        assert!(s.rollup(&[session("s1", SessionState::Working), session("s2", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, Stage::InProgress);
-    }
-
-    #[test]
-    fn rollup_waiting_counts_as_not_settled() {
-        let (mut s, _d) = store();
-        let t = s.create("A", Stage::Done).unwrap();
-        s.assign("s1", Some(&t.id));
-        s.rollup(&[session("s1", SessionState::Done)]);
-        assert!(s.rollup(&[session("s1", SessionState::Waiting)]));
-        assert_eq!(s.snapshot().tasks[0].stage, Stage::InProgress);
-    }
-
-    #[test]
-    fn a_manual_drag_out_of_done_is_not_bounced_back() {
-        let (mut s, _d) = store();
-        let t = s.create("A", Stage::InProgress).unwrap();
-        s.assign("s1", Some(&t.id));
-        s.rollup(&[session("s1", SessionState::Working)]);
-        s.rollup(&[session("s1", SessionState::Done)]);
-        assert_eq!(s.snapshot().tasks[0].stage, Stage::Done);
-
-        s.update(&t.id, None, Some(Stage::Todo));
-        // Unrelated diffs with the session still Done must not re-advance.
-        assert!(!s.rollup(&[session("s1", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, Stage::Todo);
-    }
-
-    #[test]
-    fn done_task_found_with_a_live_session_on_first_observation_is_pulled_back() {
-        let (mut s, _d) = store();
-        let t = s.create("A", Stage::Done).unwrap();
-        s.assign("s1", Some(&t.id));
-        assert!(s.rollup(&[session("s1", SessionState::Working)]));
-        assert_eq!(s.snapshot().tasks[0].stage, Stage::InProgress);
-    }
-
-    #[test]
-    fn task_without_live_sessions_is_left_alone() {
+    fn assigning_sessions_never_changes_a_tasks_stage() {
         let (mut s, _d) = store();
         let t = s.create("A", Stage::Todo).unwrap();
-        s.assign("gone", Some(&t.id));
-        assert!(!s.rollup(&[]));
+        assert!(s.assign("s1", Some(&t.id)));
+        assert!(s.assign("s2", Some(&t.id)));
         assert_eq!(s.snapshot().tasks[0].stage, Stage::Todo);
     }
 

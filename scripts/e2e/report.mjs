@@ -9,7 +9,7 @@ const passed = results.filter((r) => r.pass).length;
 const flows = {
   E01: "Board & first launch", E02: "Tasks", E03: "Unassigned tray", E04: "Assigning", E05: "Assigning", E06: "Assigning",
   E07: "Assigning", E08: "Workflow", E09: "Workflow", E10: "Task cards", E11: "Waiting / approvals", E12: "Waiting / approvals",
-  E13: "Task cards", E14: "Auto rollup", E15: "Session overlay", E16: "Session overlay", E17: "Deleting", E18: "Deleting",
+  E13: "Task cards", E14: "Manual stages", E15: "Session overlay", E16: "Session overlay", E17: "Deleting", E18: "Deleting",
   E19: "Backend", E20: "Backend", E21: "Search", E22: "Tray", E23: "Edge cases", E24: "Migration", E25: "Visual fidelity",
 };
 const secs = (ms) => (ms / 1000).toFixed(1) + "s";

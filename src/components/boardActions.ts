@@ -4,7 +4,7 @@ import { NO_DRAG, useSessionStore, type DragState } from "../store/sessionStore"
 import type { Stage } from "../types";
 
 // Every mutation goes to the Core Engine, which owns tasks/assignments;
-// the resulting state (incl. the Done rollup) comes back over the WS as a
+// the resulting state comes back over the WS as a
 // `TasksChanged` snapshot, so nothing here mutates the store locally.
 
 /** Session → task, or `null` to unassign (back to the tray). */
