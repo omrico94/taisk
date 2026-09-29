@@ -7,9 +7,6 @@ export const STAGES: { key: Stage; label: string; accent: string }[] = [
   { key: "done", label: "Done", accent: "#86B98C" },
 ];
 
-/** Design constant: In Progress column's WIP limit. */
-export const WIP_LIMIT = 5;
-
 /** Sentinel for `drag.srcTaskId` when a session is dragged out of the tray. */
 export const ORPHAN = "__orphan__";
 

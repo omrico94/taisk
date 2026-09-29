@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { createTask } from "../api";
 import { useSessionStore } from "../store/sessionStore";
-import { WIP_LIMIT, sessionsOfTask } from "../store/selectors";
+import { sessionsOfTask } from "../store/selectors";
 import type { SessionView, Stage, Task } from "../types";
 import { endDrag, getDrag, moveTask } from "./boardActions";
 import { TaskCard } from "./TaskCard";
@@ -25,7 +25,6 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
   const [title, setTitle] = useState("");
 
   const hot = drag.kind === "task" && overCol === stage;
-  const overLimit = stage === "inprogress" && tasks.length > WIP_LIMIT;
 
   const cancel = () => {
     setAdding(false);
@@ -51,11 +50,6 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
         <span className={styles.columnCount} data-testid={`count-${stage}`}>
           {tasks.length}
         </span>
-        {stage === "inprogress" && (
-          <span className={`${styles.wipBadge} ${overLimit ? styles.wipOver : ""}`} data-testid="wip-badge">
-            WIP {tasks.length}/{WIP_LIMIT}
-          </span>
-        )}
       </div>
 
       <div
