@@ -392,6 +392,18 @@
   outline: none;
 }
 .dirInput:focus { border-color: var(--tk-lime); }
+.dirBrowse {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--tk-line-hi);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.dirBrowse:hover { border-color: var(--tk-lime); color: var(--tk-lime); }
 .dirError { margin-top: 4px; font-size: 11px; color: var(--tk-danger-text); }
 .dirHint { margin-top: 4px; font-size: 10.5px; color: var(--text-faint); }
 

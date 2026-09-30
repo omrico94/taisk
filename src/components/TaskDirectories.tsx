@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { setTaskDirectories } from "../api";
 import type { Task } from "../types";
 import styles from "./Kanban.module.css";
@@ -34,6 +35,13 @@ export function TaskDirectories({ task, editing, onDone }: Props) {
     const path = draft.trim();
     if (!path) return;
     if (await save([...task.directories, path])) setDraft("");
+  };
+
+  const browse = async () => {
+    const picked = await open({ directory: true, multiple: false, title: "Choose a directory" });
+    if (typeof picked !== "string") return; // cancelled
+    if (task.directories.includes(picked)) return;
+    await save([...task.directories, picked]);
   };
 
   return (
@@ -82,6 +90,14 @@ export function TaskDirectories({ task, editing, onDone }: Props) {
               }}
               data-testid="task-directory-input"
             />
+            <button
+              type="button"
+              className={styles.dirBrowse}
+              onClick={() => void browse()}
+              data-testid="task-directory-browse"
+            >
+              Browse…
+            </button>
           </div>
           {error ? (
             <div className={styles.dirError}>{error}</div>
