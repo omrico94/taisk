@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { deleteTask } from "../api";
 import { useSessionStore } from "../store/sessionStore";
 import { taskMeta, taskRollup } from "../store/selectors";
@@ -5,6 +6,7 @@ import { fmtCost, fmtTokens, toolColorVar } from "../styles/sessionStyle";
 import type { SessionView, Task } from "../types";
 import { beginDrag, endDrag, getDrag, moveSession } from "./boardActions";
 import { SessionRow } from "./SessionRow";
+import { TaskDirectories } from "./TaskDirectories";
 import styles from "./Kanban.module.css";
 
 interface Props {
@@ -23,9 +25,11 @@ export function TaskCard({ task, sessions }: Props) {
   const { project, tool } = taskMeta(sessions);
   const isDragging = drag.kind === "task" && drag.taskId === task.id;
   const sessionOver = drag.kind === "session" && overTaskId === task.id && drag.srcTaskId !== task.id;
+  const [editingDirs, setEditingDirs] = useState(false);
 
-  // New session for this task, in the board's terminal pane: reuses the cwd
-  // of its most recently started session (the backend falls back to the
+  // New session for this task, in the board's terminal pane. The backend runs
+  // it in the task's attached directories when it has any; otherwise it
+  // reuses the cwd of its most recently started session (falling back to the
   // user's home dir if none exist yet — `sessions` is oldest-first, see
   // `sessionsOfTask`). The new `claude` process gets tagged with
   // `SESSIONBOARD_TASK_ID` so the engine files it under this task the moment
@@ -89,6 +93,18 @@ export function TaskCard({ task, sessions }: Props) {
         <span className={styles.spacer} />
         {roll.needsYou && <span className={styles.needsPill}>● Needs you</span>}
         <button
+          className={`${styles.iconButton} ${styles.taskDirsButton} ${editingDirs ? styles.taskDirsButtonOn : ""}`}
+          title="Directories new sessions for this task start in"
+          aria-label="Edit task directories"
+          data-testid="edit-task-directories"
+          onClick={(e) => {
+            e.stopPropagation();
+            setEditingDirs((v) => !v);
+          }}
+        >
+          ⌂
+        </button>
+        <button
           className={`${styles.iconButton} ${styles.taskStart}`}
           title="Start a new Claude Code session for this task"
           aria-label="Start new session"
@@ -111,6 +127,9 @@ export function TaskCard({ task, sessions }: Props) {
         </button>
       </div>
       <div className={styles.taskTitle}>{task.title}</div>
+      {(editingDirs || task.directories.length > 0) && (
+        <TaskDirectories task={task} editing={editingDirs} onDone={() => setEditingDirs(false)} />
+      )}
 
       {roll.total > 0 ? (
         <>

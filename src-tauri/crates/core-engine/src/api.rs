@@ -191,16 +191,22 @@ async fn open_task_terminal(
         .into_iter()
         .find(|t| t.id == task_id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    let cwd = usable_cwd(body.and_then(|Json(b)| b.cwd));
+    let (cwd, add_dirs) = task_launch_dirs(&task.directories, body.and_then(|Json(b)| b.cwd));
     let mut env = board_env(&state, &task.board);
     env.push(("SESSIONBOARD_TASK_ID".to_string(), task_id.clone()));
     trust_project_dir(&state, &task.board, &cwd);
+    let mut args = Vec::new();
+    for dir in add_dirs {
+        trust_project_dir(&state, &task.board, &dir);
+        args.push("--add-dir".to_string());
+        args.push(dir);
+    }
     let pty_id = state
         .terminal
         .spawn(SpawnSpec {
             cwd,
             program: state.claude_bin.clone(),
-            args: vec![],
+            args,
             env,
             session_id: None,
             task_id: Some(task_id),
@@ -210,6 +216,42 @@ async fn open_task_terminal(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     Ok(Json(OpenedTerminal { pty_id, reused: false }))
+}
+
+/// Where a session started from a task runs: the task's first attached
+/// directory that still exists is the cwd and every other existing one is
+/// handed to `claude --add-dir`. With nothing attached (or nothing left on
+/// disk) it falls back to `fallback_cwd` (the frontend sends the task's most
+/// recent session's cwd), then the home dir, same as before directories.
+fn task_launch_dirs(directories: &[String], fallback_cwd: Option<String>) -> (String, Vec<String>) {
+    let mut existing = directories.iter().filter(|d| std::path::Path::new(d).is_dir()).cloned();
+    match existing.next() {
+        Some(cwd) => (cwd, existing.collect()),
+        None => (usable_cwd(fallback_cwd), vec![]),
+    }
+}
+
+/// Validates directories typed into a task: `~` expanded, trailing slashes
+/// dropped, duplicates removed; each must be an existing absolute directory.
+fn normalize_task_directories(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in raw.iter().map(|d| d.trim()).filter(|d| !d.is_empty()) {
+        let path = crate::boards::expand_home(entry);
+        if !path.is_absolute() {
+            return Err(format!("{entry} must be an absolute path (or start with ~/)"));
+        }
+        if !path.is_dir() {
+            return Err(format!("{entry} is not an existing directory"));
+        }
+        let mut s = path.to_string_lossy().to_string();
+        while s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        }
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 /// A session on a non-default board lives under that board's own Claude config
@@ -424,18 +466,29 @@ async fn delete_board(State(state): State<AppState>, Path(id): Path<String>) -> 
 struct UpdateTaskBody {
     title: Option<String>,
     stage: Option<Stage>,
+    /// Replaces the task's attached directories (see `Task::directories`).
+    directories: Option<Vec<String>>,
 }
 
 async fn update_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateTaskBody>,
-) -> StatusCode {
-    if state.tasks.update(&id, body.title.as_deref(), body.stage).await {
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_FOUND
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // Validate before touching anything so a bad path never half-applies a patch.
+    let directories = body
+        .directories
+        .as_deref()
+        .map(normalize_task_directories)
+        .transpose()
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
+    if !state.tasks.update(&id, body.title.as_deref(), body.stage).await {
+        return Err(api_error(StatusCode::NOT_FOUND, "no such task"));
     }
+    if let Some(dirs) = directories {
+        state.tasks.set_directories(&id, dirs).await;
+    }
+    Ok(StatusCode::OK)
 }
 
 async fn delete_task(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
@@ -457,8 +510,7 @@ async fn assign_session(
     Path(id): Path<String>,
     Json(body): Json<AssignBody>,
 ) -> StatusCode {
-    let sessions = state.engine.snapshot().await;
-    if state.tasks.assign(&id, body.task_id.as_deref(), &sessions).await {
+    if state.tasks.assign(&id, body.task_id.as_deref()).await {
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
@@ -886,6 +938,65 @@ mod tests {
         let bytes = B64.decode(replay["data"].as_str().unwrap()).unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains("ping"));
         state.terminal.kill_all();
+    }
+
+    #[tokio::test]
+    async fn task_directories_are_validated_and_drive_the_new_sessions_cwd_and_add_dirs() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+        let task = state.tasks.create("Multi-repo", Stage::Todo).await.unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let a_path = a.path().to_string_lossy().to_string();
+        let b_path = b.path().to_string_lossy().to_string();
+
+        for bad in [serde_json::json!(["relative/dir"]), serde_json::json!(["/definitely/not/a/dir"])] {
+            let r = client.patch(format!("{base}/tasks/{}", task.id)).json(&serde_json::json!({"directories": bad})).send().await.unwrap();
+            assert_eq!(r.status(), 400);
+        }
+        assert!(state.tasks.snapshot().await.tasks[0].directories.is_empty());
+
+        let r = client
+            .patch(format!("{base}/tasks/{}", task.id))
+            .json(&serde_json::json!({"directories": [format!("{a_path}/"), "  ", b_path, a_path]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(state.tasks.snapshot().await.tasks[0].directories, vec![a_path.clone(), b_path.clone()]);
+
+        // The first attached dir wins over the frontend's fallback cwd.
+        let opened: serde_json::Value = client
+            .post(format!("{base}/terminals/tasks/{}", task.id))
+            .json(&serde_json::json!({"cwd": "/tmp"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let info: serde_json::Value = client
+            .get(format!("{base}/terminals/{}", opened["pty_id"].as_str().unwrap()))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(info["cwd"], a_path);
+        state.terminal.kill_all();
+    }
+
+    #[test]
+    fn task_launch_dirs_skips_vanished_dirs_and_falls_back() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let a_path = a.path().to_string_lossy().to_string();
+        let b_path = b.path().to_string_lossy().to_string();
+        let (cwd, add) = task_launch_dirs(&["/gone".into(), a_path.clone(), b_path.clone()], None);
+        assert_eq!((cwd, add), (a_path.clone(), vec![b_path]));
+        let (cwd, add) = task_launch_dirs(&["/gone".into()], Some(a_path.clone()));
+        assert_eq!((cwd, add), (a_path, vec![]));
     }
 
     #[tokio::test]

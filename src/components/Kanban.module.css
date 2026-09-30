@@ -208,6 +208,53 @@
 .taskCard:hover .taskDelete { opacity: 1; }
 .taskDelete.iconDelete:hover { background: rgba(255, 92, 92, 0.12); color: var(--tk-danger-text); }
 
+.taskDirsButton {
+  opacity: 0;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--tk-line-hi);
+  border-radius: 5px;
+  transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+  font-size: 12px;
+}
+.taskCard:hover .taskDirsButton, .taskDirsButtonOn { opacity: 1; }
+.taskDirsButton:hover, .taskDirsButtonOn { color: var(--tk-lime); border-color: var(--tk-lime); }
+
+/* ---------- Task directories ---------- */
+.dirList { display: flex; flex-wrap: wrap; gap: 5px; }
+.dirChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 4px 2px 7px;
+  border: 1px solid var(--tk-line-hi);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.dirChipPrimary { color: var(--text-primary); border-color: var(--tk-lime); }
+.dirChipName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dirChip .iconButton { width: 14px; height: 14px; font-size: 9px; }
+.dirChip .iconButton:hover { color: var(--tk-danger-text); }
+.dirAddRow { display: flex; gap: 5px; margin-top: 6px; }
+.dirInput {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--tk-line-hi);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+}
+.dirInput:focus { border-color: var(--tk-lime); }
+.dirError { margin-top: 4px; font-size: 11px; color: var(--tk-danger-text); }
+.dirHint { margin-top: 4px; font-size: 10.5px; color: var(--text-faint); }
+
 .taskStart {
   opacity: 0;
   width: 22px;

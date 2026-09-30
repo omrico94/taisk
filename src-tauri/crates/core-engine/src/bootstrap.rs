@@ -60,7 +60,6 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
     let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
     let tasks = crate::tasks::TaskHub::load(&app_data_dir.join("tasks.json"));
-    tokio::spawn(crate::tasks::run_rollup(tasks.clone(), engine.clone()));
 
     tokio::spawn(crate::engine::run_idle_sweeper(engine.clone(), orch_config.idle_ttl, orch_config.idle_sweep_interval));
     tokio::spawn(orchestrator::run(

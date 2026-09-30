@@ -426,27 +426,25 @@ await story("E13", "Working / Done visual treatments", async (s) => {
   await s("working-and-done");
 });
 
-await story("E14", "Auto rollup: all sessions Done → task moves to Done; a live session pulls it back", async (s) => {
+await story("E14", "Manual stages: session state never moves a task between columns", async (s) => {
   await fresh();
-  await addTask("inprogress", "Auto task");
-  const tid = await taskId("Auto task");
-  await mk("s1", "Rollup session number one"); await mk("s2", "Rollup session number two");
+  await addTask("inprogress", "Manual task");
+  const tid = await taskId("Manual task");
+  await mk("s1", "Manual session number one"); await mk("s2", "Manual session number two");
   await assignApi("s1", tid); await assignApi("s2", tid);
-  seed("stop", "s1");
-  await sleep(600);
-  ok((await stageOf("Auto task")) === "inprogress", "one done, one working → stays In Progress");
-  seed("stop", "s2");
-  await until(async () => (await colTitles("done")).includes("Auto task"), "UI moved the card to Done live");
-  await s("moved-to-done");
-  seed("work", "s1");
-  await until(async () => (await colTitles("inprogress")).includes("Auto task"), "pulled back to In Progress live");
-  ok((await stageOf("Auto task")) === "inprogress", "backend agrees");
-  await s("pulled-back");
-  // dropping a live session onto a Done task
+  seed("stop", "s1"); seed("stop", "s2");
+  await sleep(1200);
+  ok((await stageOf("Manual task")) === "inprogress", "all sessions done → stays In Progress");
+  ok((await colTitles("inprogress")).includes("Manual task"), "UI keeps the card in In Progress");
+  await s("stays-in-progress");
+  // a live session on a Done task leaves it in Done
   await addTask("done", "Closed task");
   await mk("s3", "Late arriving live session");
   await assignApi("s3", await taskId("Closed task"));
-  await until(async () => (await stageOf("Closed task")) === "inprogress", "Done task with a live session → In Progress");
+  seed("work", "s3");
+  await sleep(1200);
+  ok((await stageOf("Closed task")) === "done", "Done task with a live session stays Done");
+  await s("stays-done");
 });
 
 await story("E15", "Session overlay: identity, stats, ctx colours, subagents, plan, transcript, close paths", async (s) => {
