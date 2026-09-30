@@ -510,8 +510,7 @@ async fn assign_session(
     Path(id): Path<String>,
     Json(body): Json<AssignBody>,
 ) -> StatusCode {
-    let sessions = state.engine.snapshot().await;
-    if state.tasks.assign(&id, body.task_id.as_deref(), &sessions).await {
+    if state.tasks.assign(&id, body.task_id.as_deref()).await {
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND

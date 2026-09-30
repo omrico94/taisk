@@ -74,7 +74,7 @@ export interface TasksSnapshot {
 }
 
 /** One WS message: a session diff, or a full snapshot of tasks/assignments
- * (the backend owns both, incl. the Done rollup — see `tasks.rs`). */
+ * (the backend owns both — see `tasks.rs`). */
 export type BoardMessage = { Upserted: SessionView } | { Removed: string } | { TasksChanged: TasksSnapshot };
 
 export interface SearchResult {
