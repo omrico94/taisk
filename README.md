@@ -27,7 +27,7 @@ You open a terminal, then Claude Desktop, then three more sessions chasing three
 
 **taisk** watches every Claude Code session (CLI and Desktop), turns each into a live card, and lets *you* file them under tasks on a Kanban board (**Backlog → To Do → In Progress → Done**). Session state is driven by Claude Code's own hooks, so it's real state — not polling and vibes.
 
-No cloud. No accounts. No API keys. With [Ollama](https://ollama.com) installed, every model call runs on your machine; without it, taisk uses Claude Code's own session titles and keyword search instead — nothing extra to install.
+No cloud. No accounts. No API keys. **[Ollama](https://ollama.com) is optional:** install it for AI-written titles and search by meaning, all run on your machine. Or skip it, and taisk uses Claude Code's own session titles and keyword search, with nothing extra to install.
 
 ## Features
 
@@ -37,7 +37,8 @@ No cloud. No accounts. No API keys. With [Ollama](https://ollama.com) installed,
 - **Approve from the board.** Approve, reject or reply to a blocked session from its detail panel.
 - **Start a session from a task.** The **+** on a card opens an embedded terminal running `claude`, and files the new session under that task automatically.
 - **Multiple accounts.** Each board maps to one Claude config directory, so a work and a personal login live side by side.
-- **Semantic memory.** `⌘K` searches everything you've ever asked, by meaning (embeddings in an on-disk LanceDB).
+- **Memory search.** `⌘K` searches everything you've ever asked: by meaning with Ollama (embeddings in an on-disk LanceDB), by keyword without it.
+- **Ollama optional.** Works out of the box. Ollama only adds model-written titles/summaries and search by meaning.
 - **Global shortcuts** that work from *any* app, including full-screen ones (see [Demo](#demo)).
 - **Survives restarts.** The board is rebuilt from durable local storage, not a blank slate.
 
@@ -85,13 +86,15 @@ taisk is a native macOS app (Tauri). It relies on macOS APIs, so macOS is the su
 
 Works on Apple Silicon and Intel Macs running macOS 12 or later.
 
-**1. Install the prerequisites** (skip any you already have)
+> **Ollama is optional.** Skip steps 1 and 3 if you'd rather not run it. taisk detects that at launch and switches to **Claude-native** mode: cards take the title Claude Code itself generates for the session (or your `/rename`), the task line shows your latest prompt, and ⌘K search matches keywords instead of meaning. The toolbar shows which mode is active. Set `TAISK_INFERENCE=ollama` or `native` to force one.
+
+[Claude Code](https://claude.com/claude-code) must be installed. It's the thing taisk watches.
+
+**1. (Optional) Install Ollama**
 
 ```bash
-brew install --cask ollama-app      # optional: local models; or download from ollama.com
+brew install --cask ollama-app      # or download from ollama.com
 ```
-
-[Claude Code](https://claude.com/claude-code) must be installed too. It's the thing taisk watches.
 
 **2. Install taisk**
 
@@ -106,8 +109,6 @@ That taps `omrico94/homebrew-taisk` and installs `taisk.app` into `/Applications
 ```bash
 ollama pull nomic-embed-text && ollama pull qwen2.5:1.5b
 ```
-
-Skip steps 1 and 3 if you'd rather not run Ollama. taisk detects that at launch and switches to **Claude-native** mode: cards take the title Claude Code itself generates for the session (or your `/rename`), the task line shows your latest prompt, and ⌘K search matches keywords instead of meaning. The toolbar shows which mode is active. Set `TAISK_INFERENCE=ollama` or `native` to force one.
 
 **4. Launch it**
 
@@ -209,7 +210,8 @@ flowchart LR
         ORCH["orchestrator<br/>hook → event"] --> SM["state machine<br/>single-owner actor"]
         SM --> TASKS["TaskHub<br/>tasks.json + rollup"]
         ORCH --> SUM["summarize"]
-        SUM <--> OLL["Ollama<br/>(local)"]
+        SUM <--> OLL["Ollama<br/>(optional, local)"]
+        SUM --> TR["Claude transcript<br/>ai-title / last-prompt"]
         SUM --> LDB[("LanceDB<br/>memories")]
         API["axum API<br/>HTTP + WS :37888"]
         SM --> API
@@ -224,7 +226,7 @@ flowchart LR
 ### The pipeline
 
 1. **Hook fires.** taisk registers Claude Code hooks (`SessionStart`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Notification`, `Stop`, `SessionEnd`). Each invokes `hook-bridge`, which reads the payload from stdin, writes it to a Unix socket, and exits in milliseconds. It fails silently if the app isn't running, so it can never break a real session.
-2. **Orchestrator** maps the hook to a `SessionEvent`. On `session-start` it waits for the transcript, extracts the first prompt, then asks Ollama for a title and summary *off the critical path* — the card shows up as "Starting…" immediately.
+2. **Orchestrator** maps the hook to a `SessionEvent`. On `session-start` it waits for the transcript, extracts the first prompt, then gets a title and summary *off the critical path*: from Ollama if it's running, otherwise from Claude Code's own `ai-title` / `last-prompt` transcript entries. The card shows up as "Starting…" immediately.
 3. **State machine.** One tokio actor owns every live session. Every mutation goes through a single `transition(state, event)` function (table-tested for every pair) and broadcasts a diff. No shared mutexes, no scattered "just set it to Working here too".
 4. **Tasks.** `TaskHub` persists tasks and session→task assignments and owns the *Done* rollup. Assignment is always an explicit user action — never inferred.
 5. **API.** An axum server on `127.0.0.1:37888` exposes REST (`/sessions`, `/tasks`, `/search`, approve/reject/reply) plus a WebSocket that streams session diffs and task snapshots.
@@ -259,7 +261,7 @@ taisk/
 ├─ src-tauri/
 │  ├─ src/                       # Tauri shell: window, tray, global shortcuts, NSPanel popups
 │  └─ crates/
-│     ├─ core-engine/            # state machine, orchestrator, tasks, API, LanceDB, Ollama client
+│     ├─ core-engine/            # state machine, orchestrator, tasks, API, LanceDB, optional Ollama client
 │     └─ hook-bridge/            # the tiny binary Claude Code's hooks actually run
 ├─ scripts/                      # Playwright E2E harness (isolated HOME, fake Ollama)
 └─ docs/                         # e2e screenshots, design notes, README assets
