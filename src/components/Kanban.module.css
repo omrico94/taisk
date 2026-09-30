@@ -67,15 +67,6 @@
   text-transform: uppercase;
 }
 .columnCount { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); }
-.wipBadge {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: var(--tk-lime-wash);
-  color: var(--tk-lime);
-}
-.wipOver { background: rgba(255, 92, 92, 0.12); color: var(--tk-danger-text); }
 
 .columnBody {
   flex: 1;

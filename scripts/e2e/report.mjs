@@ -8,7 +8,7 @@ const results = JSON.parse(fs.readFileSync(path.join(OUT, "results.json"), "utf8
 const passed = results.filter((r) => r.pass).length;
 const flows = {
   E01: "Board & first launch", E02: "Tasks", E03: "Unassigned tray", E04: "Assigning", E05: "Assigning", E06: "Assigning",
-  E07: "Assigning", E08: "Workflow", E09: "Workflow", E10: "Task cards", E11: "Waiting / approvals", E12: "Waiting / approvals",
+  E07: "Assigning", E08: "Workflow", E10: "Task cards", E11: "Waiting / approvals", E12: "Waiting / approvals",
   E13: "Task cards", E14: "Manual stages", E15: "Session overlay", E16: "Session overlay", E17: "Deleting", E18: "Deleting",
   E19: "Backend", E20: "Backend", E21: "Search", E22: "Tray", E23: "Edge cases", E24: "Migration", E25: "Visual fidelity",
 };
@@ -29,7 +29,7 @@ Re-run: see "How to re-run" at the bottom.
 `;
 for (const r of results) md += `| ${r.id} | ${flows[r.id] ?? ""} | ${r.title} | ${r.pass ? "✅ pass" : "❌ FAIL"} | ${secs(r.ms)} |\n`;
 
-md += `\n## Visual check against the design (E25)\n\nThe populated live board (left) next to the design prototype's view **1a** (right). Same layout, tokens, cards, tray, WIP badge, needs-you glow. Deliberate differences: no fake traffic-light title bar (the real window chrome is native), data is real (so token/cost numbers differ), and a task's tool/project label is derived from its sessions (hidden while a task has none).\n\n<table><tr><td><img src="E25-live-board.png" width="520"></td><td><img src="E25-design-reference.png" width="380"></td></tr></table>\n`;
+md += `\n## Visual check against the design (E25)\n\nThe populated live board (left) next to the design prototype's view **1a** (right). Same layout, tokens, cards, tray, needs-you glow. Deliberate differences: no fake traffic-light title bar (the real window chrome is native), data is real (so token/cost numbers differ), and a task's tool/project label is derived from its sessions (hidden while a task has none).\n\n<table><tr><td><img src="E25-live-board.png" width="520"></td><td><img src="E25-design-reference.png" width="380"></td></tr></table>\n`;
 
 md += `\n## Stories in detail\n`;
 for (const r of results) {

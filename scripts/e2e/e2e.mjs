@@ -160,7 +160,6 @@ await story("E01", "First launch, empty board", async (s) => {
   ok((await page.getByTestId("tray").count()) === 0, "tray hidden when there are no sessions");
   const pill = await page.locator("[class*=pill]").first().innerText();
   ok(/0\s*working/.test(pill.replace(/\n/g, " ")) && /0\s*need you/.test(pill.replace(/\n/g, " ")), `status pill: ${pill}`);
-  ok((await page.getByTestId("wip-badge").innerText()) === "WIP 0/5", "WIP badge 0/5");
   await s("empty-board");
 });
 
@@ -329,21 +328,6 @@ await story("E08", "Drag a task card across every column (highlight, ghost opaci
   await card("Mover").waitFor();
   ok((await colTitles("backlog")).includes("Mover"), "final stage persisted after reload");
   await s("back-in-backlog");
-});
-
-await story("E09", "WIP badge turns red past the limit", async (s) => {
-  await fresh();
-  for (let i = 1; i <= 5; i++) await addTask("inprogress", `WIP task ${i}`);
-  const badge = page.getByTestId("wip-badge");
-  ok((await badge.innerText()) === "WIP 5/5", "5/5 at the limit");
-  const c5 = await badge.evaluate((e) => getComputedStyle(e).color);
-  ok(c5 !== "rgb(248, 113, 113)", "not red at the limit");
-  await s("wip-at-limit");
-  await addTask("inprogress", "WIP task 6");
-  ok((await badge.innerText()) === "WIP 6/5", "6/5 over the limit");
-  const c6 = await badge.evaluate((e) => getComputedStyle(e).color);
-  ok(c6 === "rgb(248, 113, 113)", `red over the limit, got ${c6}`);
-  await s("wip-over-limit");
 });
 
 await story("E10", "Task card rollup: progress, sums, session count, expand/collapse", async (s) => {
