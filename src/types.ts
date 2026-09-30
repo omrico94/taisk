@@ -62,15 +62,14 @@ export interface Column {
   name: string;
   /** `#RRGGBB` — alpha bytes get appended to it for washes. */
   color: string;
-  wip_limit: number | null;
 }
 
 /** One board's columns, in order, plus which column carries each role. */
 export interface BoardColumns {
   columns: Column[];
-  /** Rollup target once all a task's sessions settle; null = auto-complete off. */
+  /** Cards here read as finished (dimmed). Display only — stages are manual. */
   done: string | null;
-  /** Where the rollup pulls a done task back to when a session wakes. */
+  /** Gets the strong accent (In Progress by default). Display only. */
   active: string | null;
   /** Where quick-add files new tasks; null = first column. */
   intake: string | null;
@@ -85,6 +84,9 @@ export interface Task {
   created_at_ms: number;
   /** Board this task lives on. */
   board: string;
+  /** Attached directories: a session started from the task runs in the first
+   *  and gets the rest via `claude --add-dir`. */
+  directories: string[];
 }
 
 /** session id → task id. A session absent from the map is unassigned. */
@@ -97,7 +99,7 @@ export interface TasksSnapshot {
 }
 
 /** One WS message: a session diff, or a full snapshot of tasks/assignments
- * (the backend owns both, incl. the Done rollup — see `tasks.rs`). */
+ * (the backend owns both — see `tasks.rs`). */
 export type BoardMessage = { Upserted: SessionView } | { Removed: string } | { TasksChanged: TasksSnapshot };
 
 export interface SearchResult {

@@ -6,7 +6,7 @@
 //! board's tray.
 //!
 //! Columns are user-editable per board (`BoardColumns`): add, rename,
-//! recolor, WIP limit, reorder, delete. A board with no stored layout uses
+//! recolor, reorder, delete. A board with no stored layout uses
 //! the four defaults, whose ids (`backlog`/`todo`/`inprogress`/`done`) are
 //! exactly what the old fixed `Stage` enum serialized to — so `tasks.json`
 //! files from before columns were editable load with no migration.
@@ -16,13 +16,10 @@
 //! broadcasts a full `TasksSnapshot` on every change (tiny payload) so the
 //! WS layer can keep every open frontend in sync.
 //!
-//! Rollup ("the task follows its sessions") is backend-owned and
-//! edge-triggered: a task moves to the board's `done` column at the moment
-//! its sessions *become* all settled, and back to its `active` column at the
-//! moment a settled task gets a live session again. Edge-triggering (rather
-//! than re-asserting "all done ⇒ Done" on every diff) keeps a manual drag out
-//! of Done from bouncing back. Either role can be unset, which turns that
-//! half of the rollup off for the board.
+//! A task's stage is changed only by the user (drag or menu) — session state
+//! never moves a task between columns. Columns carry display-only roles
+//! (`done` dims its cards, `active` gets the strong accent, `intake` is where
+//! quick-add files new tasks).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -32,8 +29,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::engine::{EngineHandle, SessionId, SessionView};
-use crate::state::SessionState;
+use crate::engine::SessionId;
 
 pub type TaskId = String;
 
@@ -65,21 +61,17 @@ pub struct Column {
     pub name: String,
     /// `#RRGGBB` (the frontend appends alpha bytes to it).
     pub color: String,
-    /// Shown as a WIP badge that turns red once exceeded. Never enforced.
-    #[serde(default)]
-    pub wip_limit: Option<u32>,
 }
 
 /// One board's ordered columns plus the column ids that carry a role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardColumns {
     pub columns: Vec<Column>,
-    /// Where the rollup moves a task once all its sessions settle. `None`
-    /// turns auto-complete off for the board.
+    /// Cards here read as finished (dimmed). Display only: nothing moves a
+    /// task into or out of it automatically.
     #[serde(default)]
     pub done: Option<String>,
-    /// Where the rollup pulls a `done` task back to when one of its sessions
-    /// wakes up. `None` leaves such tasks where they are.
+    /// Gets the strong accent (In Progress by default). Display only.
     #[serde(default)]
     pub active: Option<String>,
     /// Where quick-add (⌥⌘N) files new tasks. `None` means the first column.
@@ -89,18 +81,13 @@ pub struct BoardColumns {
 
 impl Default for BoardColumns {
     fn default() -> Self {
-        let col = |id: &str, name: &str, color: &str, wip_limit| Column {
-            id: id.into(),
-            name: name.into(),
-            color: color.into(),
-            wip_limit,
-        };
+        let col = |id: &str, name: &str, color: &str| Column { id: id.into(), name: name.into(), color: color.into() };
         Self {
             columns: vec![
-                col(stage::BACKLOG, "Backlog", "#A08FC4", None),
-                col(stage::TODO, "To Do", "#6FB9C9", None),
-                col(stage::IN_PROGRESS, "In Progress", "#C8FF3D", Some(5)),
-                col(stage::DONE, "Done", "#86B98C", None),
+                col(stage::BACKLOG, "Backlog", "#A08FC4"),
+                col(stage::TODO, "To Do", "#6FB9C9"),
+                col(stage::IN_PROGRESS, "In Progress", "#C8FF3D"),
+                col(stage::DONE, "Done", "#86B98C"),
             ],
             done: Some(stage::DONE.into()),
             active: Some(stage::IN_PROGRESS.into()),
@@ -185,13 +172,11 @@ impl std::fmt::Display for TaskError {
     }
 }
 
-/// Partial edit of a column. `wip_limit: Some(None)` clears the limit.
+/// Partial edit of a column.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct ColumnPatch {
     pub name: Option<String>,
     pub color: Option<String>,
-    #[serde(default, deserialize_with = "present")]
-    pub wip_limit: Option<Option<u32>>,
 }
 
 /// Partial edit of a board's roles. `Some(None)` unsets a role; an absent
@@ -226,6 +211,11 @@ pub struct Task {
     /// existed deserialize to the default board.
     #[serde(default = "default_board")]
     pub board: String,
+    /// Directories a session started from this task works in: the first is
+    /// the new `claude` process's cwd, the rest are passed as `--add-dir`.
+    /// Absolute paths; empty means "fall back to the last session's cwd".
+    #[serde(default)]
+    pub directories: Vec<String>,
 }
 
 fn default_board() -> String {
@@ -250,9 +240,6 @@ pub struct TasksSnapshot {
 pub struct TaskStore {
     path: PathBuf,
     data: TasksSnapshot,
-    /// Last observed "all assigned sessions settled" per task, for the
-    /// edge-triggered rollup. Deliberately not persisted (see `rollup`).
-    settled: HashMap<TaskId, bool>,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -261,20 +248,13 @@ fn new_task_id() -> TaskId {
     format!("t{:x}{:x}", crate::now_ms(), NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-/// A session counts as "settled" (no more work expected from it right now)
-/// when it is Done or Idle. Working and Waiting are both *unsettled*:
-/// Waiting means blocked on the user, so the task is not finished.
-fn is_settled(state: SessionState) -> bool {
-    matches!(state, SessionState::Done | SessionState::Idle)
-}
-
 impl TaskStore {
     pub fn load(path: &Path) -> Self {
         let data = std::fs::read_to_string(path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
-        let mut store = Self { path: path.to_path_buf(), data, settled: HashMap::new() };
+        let mut store = Self { path: path.to_path_buf(), data };
         store.normalize();
         store
     }
@@ -344,6 +324,7 @@ impl TaskStore {
             stage: stage.to_string(),
             created_at_ms: crate::now_ms(),
             board: board.to_string(),
+            directories: vec![],
         };
         self.data.tasks.push(task.clone());
         Some(task)
@@ -368,12 +349,21 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Replaces the task's attached directories. Returns whether the task
+    /// exists. Callers validate/normalize the paths (see `api::update_task`).
+    pub fn set_directories(&mut self, id: &str, directories: Vec<String>) -> bool {
+        let Some(task) = self.data.tasks.iter_mut().find(|t| t.id == id) else {
+            return false;
+        };
+        task.directories = directories;
+        true
+    }
+
     /// Its sessions simply become unassigned (assignments are dropped).
     pub fn delete(&mut self, id: &str) -> bool {
         let before = self.data.tasks.len();
         self.data.tasks.retain(|t| t.id != id);
         self.data.assignments.retain(|_, task_id| task_id != id);
-        self.settled.remove(id);
         self.data.tasks.len() != before
     }
 
@@ -389,7 +379,7 @@ impl TaskStore {
     }
 
     /// Appends a column to `board`. Color defaults to an unused palette one.
-    pub fn add_column(&mut self, board: &str, name: &str, color: Option<&str>, wip_limit: Option<u32>) -> Result<Column, TaskError> {
+    pub fn add_column(&mut self, board: &str, name: &str, color: Option<&str>) -> Result<Column, TaskError> {
         let name = clean_name(name)?;
         let color = color.map(clean_color).transpose()?;
         let layout = self.columns_of_mut(board);
@@ -397,7 +387,6 @@ impl TaskStore {
             id: layout.fresh_id(&name),
             color: color.unwrap_or_else(|| layout.unused_color()),
             name,
-            wip_limit: wip_limit.filter(|n| *n > 0),
         };
         layout.columns.push(column.clone());
         Ok(column)
@@ -415,9 +404,6 @@ impl TaskStore {
         }
         if let Some(c) = color {
             column.color = c;
-        }
-        if let Some(limit) = patch.wip_limit {
-            column.wip_limit = limit.filter(|n| *n > 0);
         }
         Ok(column.clone())
     }
@@ -502,75 +488,6 @@ impl TaskStore {
     pub fn unassign_session(&mut self, session_id: &str) -> bool {
         self.data.assignments.remove(session_id).is_some()
     }
-
-    /// Applies the rollup rule against the current live sessions. Returns
-    /// whether any task's stage changed.
-    ///
-    /// A task with no live member sessions has no rollup signal (its cached
-    /// state is forgotten), so after a restart — when reconstruction
-    /// re-adds sessions gradually — the first observation of a task only
-    /// *records* its state and never moves it, except that a task in its
-    /// board's `done` column which turns out to have a live session is pulled
-    /// back to the `active` column.
-    pub fn rollup(&mut self, sessions: &[SessionView]) -> bool {
-        // Index live sessions by id so member lookup below is O(1).
-        let by_id: HashMap<&str, &SessionView> = sessions.iter().map(|s| (s.id.as_str(), s)).collect();
-        let TasksSnapshot { tasks, assignments, columns, default_columns } = &mut self.data;
-        let mut changed = false;
-        for task in tasks.iter_mut() {
-            // Collect this task's member sessions: every assignment pointing
-            // at the task whose session is currently live on the board.
-            let members: Vec<&SessionView> = assignments
-                .iter()
-                .filter(|(_, tid)| **tid == task.id)
-                .filter_map(|(sid, _)| by_id.get(sid.as_str()).copied())
-                .collect();
-            // No live members -> no signal. Forget the cached state so the
-            // next observation is treated as a first look, and leave the
-            // task's stage exactly where the user (or last rollup) put it.
-            if members.is_empty() {
-                self.settled.remove(&task.id);
-                continue;
-            }
-            let layout = columns.get(&task.board).unwrap_or(default_columns);
-            let in_done = layout.done.as_deref() == Some(task.stage.as_str());
-            // The task is "settled" only when *every* member session is.
-            // One still-working (or waiting) session keeps it unsettled.
-            let settled = members.iter().all(|s| is_settled(s.state));
-            // Remember this observation and get back the previous one; the
-            // stage only moves on a *change* (edge), never on a steady state.
-            // That way a user who manually drags a task to another column
-            // isn't overridden on every diff while sessions stay unchanged.
-            let prev = self.settled.insert(task.id.clone(), settled);
-            let target = match prev {
-                // Edge: the settled status flipped since the last look.
-                // Working -> all settled: auto-move to the done column; a
-                // session woke back up: pull it back to the active column.
-                Some(p) if p != settled => {
-                    if settled {
-                        layout.done.clone()
-                    } else if in_done {
-                        layout.active.clone()
-                    } else {
-                        None
-                    }
-                }
-                // First observation (e.g. right after a restart): never
-                // auto-complete, since sessions are re-added gradually and
-                // "all settled" may just mean "not all loaded yet". Only
-                // correct the one clearly wrong case: a done task with a
-                // live, unsettled session.
-                None if !settled && in_done => layout.active.clone(),
-                // Steady state: leave the stage alone.
-                _ => None,
-            };
-            if let Some(stage) = target.filter(|s| *s != task.stage) {
-                task.stage = stage;
-                changed = true;
-            }
-        }
-        changed
-    }
 }
 
 /// Shared handle: the store plus its change broadcast. Cheap to clone.
@@ -652,8 +569,8 @@ impl TaskHub {
         self.try_mutate(|s| s.update(id, title, stage)).await
     }
 
-    pub async fn add_column(&self, board: &str, name: &str, color: Option<&str>, wip_limit: Option<u32>) -> Result<Column, TaskError> {
-        self.try_mutate(|s| s.add_column(board, name, color, wip_limit)).await
+    pub async fn add_column(&self, board: &str, name: &str, color: Option<&str>) -> Result<Column, TaskError> {
+        self.try_mutate(|s| s.add_column(board, name, color)).await
     }
 
     pub async fn update_column(&self, board: &str, id: &str, patch: &ColumnPatch) -> Result<Column, TaskError> {
@@ -672,6 +589,14 @@ impl TaskHub {
         self.try_mutate(|s| s.delete_column(board, id, move_to)).await
     }
 
+    pub async fn set_directories(&self, id: &str, directories: Vec<String>) -> bool {
+        self.mutate(|s| {
+            let ok = s.set_directories(id, directories);
+            (ok, ok)
+        })
+        .await
+    }
+
     pub async fn delete(&self, id: &str) -> bool {
         self.mutate(|s| {
             let ok = s.delete(id);
@@ -680,15 +605,10 @@ impl TaskHub {
         .await
     }
 
-    /// Assigns/unassigns, then re-runs the rollup against `sessions` so
-    /// (for example) dropping a live session onto a Done task pulls it back
-    /// to In Progress in the same broadcast.
-    pub async fn assign(&self, session_id: &str, task_id: Option<&str>, sessions: &[SessionView]) -> bool {
+    /// Assigns/unassigns. Never changes the task's stage.
+    pub async fn assign(&self, session_id: &str, task_id: Option<&str>) -> bool {
         self.mutate(|s| {
             let ok = s.assign(session_id, task_id);
-            if ok {
-                s.rollup(sessions);
-            }
             (ok, ok)
         })
         .await
@@ -702,44 +622,12 @@ impl TaskHub {
         })
         .await
     }
-
-    pub async fn rollup(&self, sessions: &[SessionView]) {
-        self.mutate(|s| {
-            let changed = s.rollup(sessions);
-            ((), changed)
-        })
-        .await
-    }
-}
-
-/// Keeps task stages following their sessions: on every engine diff, re-runs
-/// the rollup against a fresh snapshot. Spawned once from `bootstrap::start`.
-pub async fn run_rollup(hub: TaskHub, engine: EngineHandle) {
-    let mut rx = engine.subscribe();
-    loop {
-        match rx.recv().await {
-            // The diff's contents are ignored on purpose: we re-read a full
-            // snapshot instead. A lagged receiver (missed diffs) is handled
-            // the same way, since the snapshot is the source of truth.
-            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                let sessions = engine.snapshot().await;
-                hub.rollup(&sessions).await;
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use super::stage::{BACKLOG, DONE, IN_PROGRESS, TODO};
-
-    fn session(id: &str, state: SessionState) -> SessionView {
-        let mut s = SessionView::new_starting(id.into(), "proj".into(), "/tmp".into(), "cli".into(), 0);
-        s.state = state;
-        s
-    }
 
     fn store() -> (TaskStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -807,68 +695,24 @@ mod tests {
     }
 
     #[test]
-    fn rollup_moves_task_to_done_when_all_sessions_settle_and_back_when_revived() {
-        let (mut s, _d) = store();
-        let t = s.create("A", IN_PROGRESS).unwrap();
-        s.assign("s1", Some(&t.id));
-        s.assign("s2", Some(&t.id));
-
-        // First observation only records.
-        assert!(!s.rollup(&[session("s1", SessionState::Working), session("s2", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, IN_PROGRESS);
-
-        // Working -> Done edge: task advances.
-        assert!(s.rollup(&[session("s1", SessionState::Done), session("s2", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, DONE);
-
-        // Idle counts as settled: no change.
-        assert!(!s.rollup(&[session("s1", SessionState::Idle), session("s2", SessionState::Done)]));
-
-        // A settled Done task gets a live session again: pulled back.
-        assert!(s.rollup(&[session("s1", SessionState::Working), session("s2", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, IN_PROGRESS);
+    fn directories_persist_and_old_tasks_load_without_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        std::fs::write(&path, r#"{"tasks":[{"id":"t1","title":"A","stage":"todo","created_at_ms":0}],"assignments":{}}"#).unwrap();
+        let mut s = TaskStore::load(&path);
+        assert!(s.snapshot().tasks[0].directories.is_empty());
+        assert!(s.set_directories("t1", vec!["/a".into(), "/b".into()]));
+        assert!(!s.set_directories("missing", vec![]));
+        s.save().unwrap();
+        assert_eq!(TaskStore::load(&path).snapshot().tasks[0].directories, vec!["/a", "/b"]);
     }
 
     #[test]
-    fn rollup_waiting_counts_as_not_settled() {
-        let (mut s, _d) = store();
-        let t = s.create("A", DONE).unwrap();
-        s.assign("s1", Some(&t.id));
-        s.rollup(&[session("s1", SessionState::Done)]);
-        assert!(s.rollup(&[session("s1", SessionState::Waiting)]));
-        assert_eq!(s.snapshot().tasks[0].stage, IN_PROGRESS);
-    }
-
-    #[test]
-    fn a_manual_drag_out_of_done_is_not_bounced_back() {
-        let (mut s, _d) = store();
-        let t = s.create("A", IN_PROGRESS).unwrap();
-        s.assign("s1", Some(&t.id));
-        s.rollup(&[session("s1", SessionState::Working)]);
-        s.rollup(&[session("s1", SessionState::Done)]);
-        assert_eq!(s.snapshot().tasks[0].stage, DONE);
-
-        s.update(&t.id, None, Some(TODO)).unwrap();
-        // Unrelated diffs with the session still Done must not re-advance.
-        assert!(!s.rollup(&[session("s1", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, TODO);
-    }
-
-    #[test]
-    fn done_task_found_with_a_live_session_on_first_observation_is_pulled_back() {
-        let (mut s, _d) = store();
-        let t = s.create("A", DONE).unwrap();
-        s.assign("s1", Some(&t.id));
-        assert!(s.rollup(&[session("s1", SessionState::Working)]));
-        assert_eq!(s.snapshot().tasks[0].stage, IN_PROGRESS);
-    }
-
-    #[test]
-    fn task_without_live_sessions_is_left_alone() {
+    fn assigning_sessions_never_changes_a_tasks_stage() {
         let (mut s, _d) = store();
         let t = s.create("A", TODO).unwrap();
-        s.assign("gone", Some(&t.id));
-        assert!(!s.rollup(&[]));
+        assert!(s.assign("s1", Some(&t.id)));
+        assert!(s.assign("s2", Some(&t.id)));
         assert_eq!(s.snapshot().tasks[0].stage, TODO);
     }
 
@@ -917,20 +761,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tasks.json");
         let mut s = TaskStore::load(&path);
-        let a = s.add_column("work", "QA", None, Some(2)).unwrap();
-        let b = s.add_column("work", "QA", None, None).unwrap();
+        let a = s.add_column("work", "QA", None).unwrap();
+        let b = s.add_column("work", "QA", None).unwrap();
         assert_eq!((a.id.as_str(), b.id.as_str()), ("qa", "qa-2"), "ids stay unique");
         assert_ne!(a.color, b.color, "new columns get an unused palette color");
-        assert_eq!(s.add_column("work", "Order", None, None).unwrap().id, "order-2", "route names are reserved");
+        assert_eq!(s.add_column("work", "Order", None).unwrap().id, "order-2", "route names are reserved");
         s.delete_column("work", "order-2", "qa").unwrap();
-        assert!(s.add_column("work", "  ", None, None).is_err());
-        assert!(s.add_column("work", "X", Some("red"), None).is_err());
+        assert!(s.add_column("work", "  ", None).is_err());
+        assert!(s.add_column("work", "X", Some("red")).is_err());
         assert_eq!(ids(&s, "default").len(), 4, "other boards are untouched");
 
         let renamed = s.update_column("work", "qa", &ColumnPatch { name: Some("Testing".into()), ..Default::default() }).unwrap();
         assert_eq!((renamed.id.as_str(), renamed.name.as_str()), ("qa", "Testing"), "rename keeps the id");
-        let cleared = s.update_column("work", "qa", &ColumnPatch { wip_limit: Some(None), ..Default::default() }).unwrap();
-        assert_eq!(cleared.wip_limit, None);
         assert_eq!(s.update_column("work", "nope", &ColumnPatch::default()), Err(TaskError::NotFound));
         s.save().unwrap();
 
@@ -978,25 +820,5 @@ mod tests {
         s.set_roles("default", &RolesPatch { active: Some(None), intake: Some(Some(BACKLOG.into())), ..Default::default() }).unwrap();
         let l = s.columns_of("default");
         assert_eq!((l.done.as_deref(), l.active.as_deref(), l.intake.as_deref()), (Some(DONE), None, Some(BACKLOG)));
-    }
-
-    #[test]
-    fn rollup_follows_the_boards_roles() {
-        let (mut s, _d) = store();
-        let shipped = s.add_column("default", "Shipped", None, None).unwrap().id;
-        s.set_roles("default", &RolesPatch { done: Some(Some(shipped.clone())), active: Some(Some(TODO.into())), ..Default::default() })
-            .unwrap();
-        let t = s.create("A", IN_PROGRESS).unwrap();
-        s.assign("s1", Some(&t.id));
-        s.rollup(&[session("s1", SessionState::Working)]);
-        assert!(s.rollup(&[session("s1", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, shipped);
-        assert!(s.rollup(&[session("s1", SessionState::Working)]));
-        assert_eq!(s.snapshot().tasks[0].stage, TODO);
-
-        // No done role: auto-complete is off.
-        s.set_roles("default", &RolesPatch { done: Some(None), ..Default::default() }).unwrap();
-        assert!(!s.rollup(&[session("s1", SessionState::Done)]));
-        assert_eq!(s.snapshot().tasks[0].stage, TODO);
     }
 }

@@ -160,7 +160,6 @@ await story("E01", "First launch, empty board", async (s) => {
   ok((await page.getByTestId("tray").count()) === 0, "tray hidden when there are no sessions");
   const pill = await page.locator("[class*=pill]").first().innerText();
   ok(/0\s*working/.test(pill.replace(/\n/g, " ")) && /0\s*need you/.test(pill.replace(/\n/g, " ")), `status pill: ${pill}`);
-  ok((await page.getByTestId("wip-badge-inprogress").innerText()) === "WIP 0/5", "WIP badge 0/5");
   await s("empty-board");
 });
 
@@ -331,22 +330,6 @@ await story("E08", "Drag a task card across every column (highlight, ghost opaci
   await s("back-in-backlog");
 });
 
-await story("E09", "WIP badge turns red past the limit", async (s) => {
-  await fresh();
-  for (let i = 1; i <= 5; i++) await addTask("inprogress", `WIP task ${i}`);
-  const badge = page.getByTestId("wip-badge-inprogress");
-  ok((await badge.innerText()) === "WIP 5/5", "5/5 at the limit");
-  const c5 = await badge.evaluate((e) => getComputedStyle(e).color);
-  const RED = "rgb(255, 143, 143)"; // --tk-danger-text
-  ok(c5 !== RED, "not red at the limit");
-  await s("wip-at-limit");
-  await addTask("inprogress", "WIP task 6");
-  ok((await badge.innerText()) === "WIP 6/5", "6/5 over the limit");
-  const c6 = await badge.evaluate((e) => getComputedStyle(e).color);
-  ok(c6 === RED, `red over the limit, got ${c6}`);
-  await s("wip-over-limit");
-});
-
 await story("E10", "Task card rollup: progress, sums, session count, expand/collapse", async (s) => {
   await fresh();
   await addTask("inprogress", "Rollup task");
@@ -443,27 +426,25 @@ await story("E13", "Working / Done visual treatments", async (s) => {
   await s("working-and-done");
 });
 
-await story("E14", "Auto rollup: all sessions Done → task moves to Done; a live session pulls it back", async (s) => {
+await story("E14", "Manual stages: session state never moves a task between columns", async (s) => {
   await fresh();
-  await addTask("inprogress", "Auto task");
-  const tid = await taskId("Auto task");
-  await mk("s1", "Rollup session number one"); await mk("s2", "Rollup session number two");
+  await addTask("inprogress", "Manual task");
+  const tid = await taskId("Manual task");
+  await mk("s1", "Manual session number one"); await mk("s2", "Manual session number two");
   await assignApi("s1", tid); await assignApi("s2", tid);
-  seed("stop", "s1");
-  await sleep(600);
-  ok((await stageOf("Auto task")) === "inprogress", "one done, one working → stays In Progress");
-  seed("stop", "s2");
-  await until(async () => (await colTitles("done")).includes("Auto task"), "UI moved the card to Done live");
-  await s("moved-to-done");
-  seed("work", "s1");
-  await until(async () => (await colTitles("inprogress")).includes("Auto task"), "pulled back to In Progress live");
-  ok((await stageOf("Auto task")) === "inprogress", "backend agrees");
-  await s("pulled-back");
-  // dropping a live session onto a Done task
+  seed("stop", "s1"); seed("stop", "s2");
+  await sleep(1200);
+  ok((await stageOf("Manual task")) === "inprogress", "all sessions done → stays In Progress");
+  ok((await colTitles("inprogress")).includes("Manual task"), "UI keeps the card in In Progress");
+  await s("stays-in-progress");
+  // a live session on a Done task leaves it in Done
   await addTask("done", "Closed task");
   await mk("s3", "Late arriving live session");
   await assignApi("s3", await taskId("Closed task"));
-  await until(async () => (await stageOf("Closed task")) === "inprogress", "Done task with a live session → In Progress");
+  seed("work", "s3");
+  await sleep(1200);
+  ok((await stageOf("Closed task")) === "done", "Done task with a live session stays Done");
+  await s("stays-done");
 });
 
 await story("E15", "Session overlay: identity, stats, ctx colours, subagents, plan, transcript, close paths", async (s) => {
@@ -764,7 +745,7 @@ await story("E25", "Visual check: populated board next to the design prototype (
   }
 });
 
-await story("E26", "Custom columns: add, rename, recolor, WIP, reorder, roles drive the rollup, delete moves tasks", async (s) => {
+await story("E26", "Custom columns: add, rename, recolor, reorder, display roles, quick-add column, delete moves tasks", async (s) => {
   await fresh();
   const layout = async () => {
     const snap = (await api("/tasks")).json;
@@ -790,14 +771,10 @@ await story("E26", "Custom columns: add, rename, recolor, WIP, reorder, roles dr
   await until(async () => (await page.getByTestId("column-label-in-review").innerText()).toUpperCase() === "QA", "renamed in the UI");
   ok((await layout()).columns.find((c) => c.id === "in-review").name === "QA", "renamed in the backend, id unchanged");
 
-  // Recolor + WIP limit from the ⋯ menu
+  // Recolor from the ⋯ menu
   let m = await menu("in-review");
   await m.getByLabel("Color #E07A8B").click();
   await until(async () => (await layout()).columns.find((c) => c.id === "in-review").color === "#E07A8B", "recolored");
-  await m.getByLabel("WIP limit").fill("1");
-  await page.keyboard.press("Enter");
-  await page.getByTestId("wip-badge-in-review").waitFor();
-  ok((await page.getByTestId("wip-badge-in-review").innerText()) === "WIP 0/1", "WIP badge appears");
   await s("column-menu");
   await page.keyboard.press("Escape");
 
@@ -809,18 +786,24 @@ await story("E26", "Custom columns: add, rename, recolor, WIP, reorder, roles dr
   await m.getByText("Move right →").click();
   await until(async () => (await order()).indexOf("in-review") === 2, "moved right via the menu");
 
-  // Make QA the auto-done column: the rollup now lands there
+  // Make QA the finished column: its cards are dimmed. Stages stay manual —
+  // a session finishing never moves its task.
   m = await menu("in-review");
   await m.getByTestId("role-done").click();
   await until(async () => (await layout()).done === "in-review", "done role moved to QA");
   await page.keyboard.press("Escape");
-  await addTask("inprogress", "Review me");
+  await addTask("in-review", "Review me");
+  await until(async () => (await card("Review me").evaluate((e) => getComputedStyle(e).opacity)) === "0.7", "finished-column card is dimmed");
   await mk("r1", "A session that finishes");
   await assignApi("r1", await taskId("Review me"));
-  seed("stop", "r1");
-  await until(async () => (await colTitles("in-review")).includes("Review me"), "rollup moved the task to QA live");
-  ok((await page.getByTestId("wip-badge-in-review").innerText()) === "WIP 1/1", "WIP counts it");
-  await s("rollup-into-custom-column");
+  await addTask("inprogress", "Still going");
+  await mk("r2", "Another session that finishes");
+  await assignApi("r2", await taskId("Still going"));
+  seed("stop", "r1"); seed("stop", "r2");
+  await sleep(1000);
+  ok((await stageOf("Still going")) === "inprogress", "a finished session doesn't move its task");
+  ok((await card("Still going").evaluate((e) => getComputedStyle(e).opacity)) === "1", "cards outside the finished column aren't dimmed");
+  await s("finished-column");
 
   // Quick-add (no stage) lands in the intake column
   const quick = await api("/tasks", "POST", { title: "Quick one" });

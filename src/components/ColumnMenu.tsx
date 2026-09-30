@@ -10,8 +10,8 @@ import styles from "./Kanban.module.css";
 const MENU_W = 250;
 
 const ROLES: { role: ColumnRole; label: string; hint: string }[] = [
-  { role: "done", label: "Auto-done column", hint: "Tasks move here when all their sessions finish" },
-  { role: "active", label: "Reopen column", hint: "Done tasks come back here when a session wakes up" },
+  { role: "done", label: "Finished column", hint: "Cards here are shown as done (dimmed)" },
+  { role: "active", label: "Highlighted column", hint: "Gets the bright accent, like In Progress" },
   { role: "intake", label: "Quick-add column", hint: "⌥⌘N files new tasks here" },
 ];
 
@@ -25,7 +25,7 @@ interface Props {
   onRename: () => void;
 }
 
-/** A column's ⋯ menu: rename, color, WIP limit, reorder, roles, delete.
+/** A column's ⋯ menu: rename, color, reorder, roles, delete.
  * `position: fixed` in a portal so it escapes the board's overflow clipping;
  * closes on any outside click or Escape (same pattern as `AssignMenu`). */
 export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRename }: Props) {
@@ -34,7 +34,6 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
   const index = layout.columns.findIndex((c) => c.id === column.id);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [moveTo, setMoveTo] = useState(others[Math.max(0, index - 1)]?.id ?? "");
-  const [wip, setWip] = useState(column.wip_limit === null ? "" : String(column.wip_limit));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -53,14 +52,6 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
 
   const run = (p: Promise<unknown>, close = true) =>
     p.then(() => close && onClose()).catch((err: Error) => setError(err.message));
-
-  const commitWip = () => {
-    const raw = wip.trim();
-    const next = raw === "" ? null : Math.floor(Number(raw));
-    if (next !== null && (!Number.isFinite(next) || next < 0)) return setError("WIP limit must be a positive number");
-    const limit = next === 0 ? null : next;
-    if (limit !== column.wip_limit) run(updateColumn(board, column.id, { wip_limit: limit }), false);
-  };
 
   const move = (delta: number) => {
     moveColumn(column.id, index + delta);
@@ -133,21 +124,6 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
             ))}
           </div>
 
-          <label className={styles.menuField}>
-            <span>WIP limit</span>
-            <input
-              className={styles.menuInput}
-              inputMode="numeric"
-              placeholder="none"
-              value={wip}
-              aria-label="WIP limit"
-              onChange={(e) => setWip(e.target.value.replace(/[^0-9]/g, ""))}
-              onBlur={commitWip}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") e.currentTarget.blur();
-              }}
-            />
-          </label>
 
           <div className={styles.menuRow}>
             <button className={styles.menuItem} disabled={index <= 0} onClick={() => move(-1)}>

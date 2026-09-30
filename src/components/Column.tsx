@@ -27,13 +27,12 @@ export function Column({ column, layout, tasks, sessions, assignments }: Props) 
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
 
-  const { id, name, color: accent, wip_limit } = column;
+  const { id, name, color: accent } = column;
   const board = () => useSessionStore.getState().activeBoardId;
   // The active-role column (In Progress by default) gets the stronger accent.
   const strong = layout.active === id;
   const hot = drag.kind === "task" && overCol === id;
   const reorderTarget = drag.kind === "column" && overCol === id && drag.colId !== id;
-  const overLimit = wip_limit !== null && tasks.length > wip_limit;
 
   const cancel = () => {
     setAdding(false);
@@ -110,11 +109,6 @@ export function Column({ column, layout, tasks, sessions, assignments }: Props) 
         <span className={styles.columnCount} data-testid={`count-${id}`}>
           {tasks.length}
         </span>
-        {wip_limit !== null && (
-          <span className={`${styles.wipBadge} ${overLimit ? styles.wipOver : ""}`} data-testid={`wip-badge-${id}`}>
-            WIP {tasks.length}/{wip_limit}
-          </span>
-        )}
         <button
           className={styles.columnMenuButton}
           aria-label={`${name} column options`}
