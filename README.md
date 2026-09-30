@@ -86,17 +86,9 @@ taisk is a native macOS app (Tauri). It relies on macOS APIs, so macOS is the su
 
 Works on Apple Silicon and Intel Macs running macOS 12 or later.
 
-> **Ollama is optional.** Skip steps 1 and 3 if you'd rather not run it. taisk detects that at launch and switches to **Claude-native** mode: cards take the title Claude Code itself generates for the session (or your `/rename`), the task line shows your latest prompt, and ⌘K search matches keywords instead of meaning. The toolbar shows which mode is active. Set `TAISK_INFERENCE=ollama` or `native` to force one.
-
 [Claude Code](https://claude.com/claude-code) must be installed. It's the thing taisk watches.
 
-**1. (Optional) Install Ollama**
-
-```bash
-brew install --cask ollama-app      # or download from ollama.com
-```
-
-**2. Install taisk**
+**1. Install taisk**
 
 ```bash
 brew install --cask omrico94/taisk/taisk
@@ -104,15 +96,20 @@ brew install --cask omrico94/taisk/taisk
 
 That taps `omrico94/homebrew-taisk` and installs `taisk.app` into `/Applications`. The app isn't notarized yet, so the cask clears macOS's quarantine flag for you.
 
-**3. (Optional) Pull the two small models taisk uses**
+**2. Launch it**
+
+Open **taisk** from Spotlight or `/Applications`. On first launch it registers its hooks in `~/.claude/settings.json` and creates `~/Library/Application Support/taisk/`. Then start `claude` in any terminal and the session appears on the board. See the [60-second walkthrough](#3-a-60-second-walkthrough).
+
+**Optional: Ollama for model-written titles and search by meaning**
+
+taisk works without Ollama. It then runs in **Claude-native** mode: cards take the title Claude Code itself generates for the session (or your `/rename`), the task line shows your latest prompt, and ⌘K search matches keywords instead of meaning. To use local models instead:
 
 ```bash
+brew install --cask ollama-app      # or download from ollama.com
 ollama pull nomic-embed-text && ollama pull qwen2.5:1.5b
 ```
 
-**4. Launch it**
-
-Open **taisk** from Spotlight or `/Applications`. On first launch it registers its hooks in `~/.claude/settings.json` and creates `~/Library/Application Support/taisk/`. Then start `claude` in any terminal and the session appears on the board. See the [60-second walkthrough](#3-a-60-second-walkthrough).
+Restart taisk afterwards: the mode is picked at launch, and the toolbar shows which one is active. Set `TAISK_INFERENCE=ollama` or `native` to force one.
 
 **Update**
 
@@ -137,7 +134,7 @@ taisk's hooks stay in `~/.claude/settings.json` after uninstalling. They fail si
 |---|---|
 | macOS says the app "can't be opened" | Right-click taisk in `/Applications` → **Open** once, or run `xattr -cr /Applications/taisk.app` |
 | `brew` can't find the cask | Run `brew update`, or `brew tap omrico94/taisk` first |
-| Sessions show up with crude titles | In Claude-native mode the title upgrades to Claude's own after the first reply. With Ollama, check it's running and both models are pulled (step 3) |
+| Sessions show up with crude titles | In Claude-native mode the title upgrades to Claude's own after the first reply. With Ollama, check it's running and both models are pulled (see *Optional: Ollama* above) |
 | A session never appears | It must have sent at least one prompt, and taisk must have been launched at least once so its hooks are registered |
 
 ### Build from source
