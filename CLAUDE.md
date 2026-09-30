@@ -102,6 +102,8 @@ If a session still doesn't show up, check `~/.claude/projects/<sanitized-cwd>/<s
 
 `tasks.rs`: a `Task` is `{id, title, stage, created_at_ms}`; `TaskStore` also holds `assignments` (session id → task id; absent = unassigned, shown in the board's tray). Assignment is **always an explicit user action** (drag or ▾ menu) — never inferred. Project/tool on a task card are derived from its sessions, not stored. Durable in `tasks.json` (same atomic-write pattern as `EndedSessions`).
 
+**Task directories.** A task can carry `directories` (edited from the card's ⌂ button, `PATCH /tasks/:id {directories}` — validated server-side: `~` expanded, must be an existing absolute dir, deduped). "Start a new session" from the task (`POST /terminals/tasks/:id`, `api::task_launch_dirs`) runs `claude` in the first one that still exists and passes the rest as `--add-dir`, pre-trusting each; with none attached it falls back to the last session's cwd as before.
+
 **Rollup is backend-owned and edge-triggered** (`TaskStore::rollup`, driven by `tasks::run_rollup` on every engine diff): a task moves to `Done` at the moment all its live sessions *become* settled (`Done` or `Idle`), and back to `InProgress` when a settled `Done` task gets a live session again. Edge-triggering (not "all done ⇒ Done" on every diff) is deliberate: it stops a manual drag out of Done from bouncing straight back. After a restart the first observation of a task only records its state (reconstruction re-adds sessions gradually), except that a `Done` task found with a live session is pulled back to `InProgress`. A delete of a session drops its assignment; deleting a task orphans its sessions.
 
 ### Frontend (Kanban) gotchas
