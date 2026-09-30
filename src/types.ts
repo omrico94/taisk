@@ -53,7 +53,29 @@ export interface PlanView {
   steps: PlanStep[];
 }
 
-export type Stage = "backlog" | "todo" | "inprogress" | "done";
+/** A column id on the task's board (see `BoardColumns`). */
+export type Stage = string;
+
+export interface Column {
+  /** Stable across renames. */
+  id: string;
+  name: string;
+  /** `#RRGGBB` — alpha bytes get appended to it for washes. */
+  color: string;
+}
+
+/** One board's columns, in order, plus which column carries each role. */
+export interface BoardColumns {
+  columns: Column[];
+  /** Cards here read as finished (dimmed). Display only — stages are manual. */
+  done: string | null;
+  /** Gets the strong accent (In Progress by default). Display only. */
+  active: string | null;
+  /** Where quick-add files new tasks; null = first column. */
+  intake: string | null;
+}
+
+export type ColumnRole = "done" | "active" | "intake";
 
 export interface Task {
   id: string;
@@ -62,6 +84,9 @@ export interface Task {
   created_at_ms: number;
   /** Board this task lives on. */
   board: string;
+  /** Attached directories: a session started from the task runs in the first
+   *  and gets the rest via `claude --add-dir`. */
+  directories: string[];
   /** The tracker ticket this task was imported from, if any. */
   ticket?: TicketRef | null;
 }
@@ -129,10 +154,13 @@ export interface TicketsResponse {
 export interface TasksSnapshot {
   tasks: Task[];
   assignments: Record<string, string>;
+  /** board id → layout; a board absent here uses `default_columns`. */
+  columns: Record<string, BoardColumns>;
+  default_columns: BoardColumns;
 }
 
 /** One WS message: a session diff, or a full snapshot of tasks/assignments
- * (the backend owns both, incl. the Done rollup — see `tasks.rs`). */
+ * (the backend owns both — see `tasks.rs`). */
 export type BoardMessage = { Upserted: SessionView } | { Removed: string } | { TasksChanged: TasksSnapshot };
 
 export interface SearchResult {

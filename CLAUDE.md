@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-taisk is a local-first Tauri (Rust) + React/TypeScript desktop app. It watches every running Claude Code session on the machine (CLI and Desktop), turns each into a live session that the user files under Kanban tasks (Backlog / To Do / In Progress / Done), drives that session's state from Claude Code's own hooks, and backs semantic search over session history with an embedded LanceDB vector store. All inference (session titles/summaries, embeddings) runs through a local Ollama instance — no cloud calls, no accounts, no API keys anywhere in this codebase.
+taisk is a local-first Tauri (Rust) + React/TypeScript desktop app. It watches every running Claude Code session on the machine (CLI and Desktop), turns each into a live session that the user files under Kanban tasks (Backlog / To Do / In Progress / Done), drives that session's state from Claude Code's own hooks, and backs semantic search over session history with an embedded LanceDB vector store. Inference (session titles/summaries, embeddings) runs through a local Ollama instance when one is ready, and otherwise falls back to **Claude-native** mode (Claude Code's own transcript data + keyword search, see "Inference backends" below) — no cloud calls, no accounts, no API keys anywhere in this codebase.
 
 There's a project-scoped setup skill at `.claude/skills/install-sessionboard/` — use it (or read it) before assuming a dependency is missing.
 
@@ -50,8 +50,8 @@ Claude Code hook fires
       - every mutation goes through state::transition(current, event) — the
         one place state changes happen, table-tested for every (state, event) pair
       - broadcasts a SessionDiff on every change
-  → tasks::TaskHub  (tasks.json: tasks + session→task assignments; backend-owned
-    Done rollup; broadcasts a full TasksSnapshot on every change)
+  → tasks::TaskHub  (tasks.json: tasks + session→task assignments; stages are
+    manual-only; broadcasts a full TasksSnapshot on every change)
   → api::router (axum, localhost:37888)  — GET /sessions, WS /events (session diffs
     + {"TasksChanged": snapshot}), POST approve/reject/reply, /tasks CRUD,
     PUT /sessions/:id/task, GET /search
@@ -96,20 +96,34 @@ If a session still doesn't show up, check `~/.claude/projects/<sanitized-cwd>/<s
 
 ### Summary step (was "categorization")
 
-`summarize.rs`'s `summarize_session()` embeds the prompt (`nomic-embed-text`) for search and makes one `qwen2.5:1.5b` call for a stable session `title` + initial `task_summary`; an unparseable response falls back to the prompt's first words. There are no categories any more — grouping is the user's job, done with tasks.
+`summarize.rs`'s `summarize_session()` embeds the prompt (`nomic-embed-text`) for search and makes one `qwen2.5:1.5b` call for a stable session `title` + initial `task_summary`; an unparseable response falls back to the prompt's first words. There are no categories any more — grouping is the user's job, done with tasks. It **always** writes the `memories` row, even when Ollama fails (zero vector) — that row is what reconstruction rebuilds the board from, and skipping it (the old `embed(...)?` early return) left cards on "Starting…" forever and dropped them on restart.
+
+### Inference backends: Ollama or Claude-native
+
+`summarize::InferenceBackend` is picked once at startup (`bootstrap::start`): `TAISK_INFERENCE=ollama|native` forces it, otherwise `Ollama` only if `first_run::check_ollama_readiness` says `Ready`, else `Native`. `GET /inference` reports it (Toolbar caption). In `Native` mode no model is ever called:
+
+- **Title**: Claude Code writes its own into the transcript — `{"type":"ai-title","aiTitle":…}` (appears after the first turn, may be rewritten; latest wins), `{"type":"custom-title","customTitle":…}` from `/rename`, `{"type":"summary","summary":…}` on compaction (`collector::extract_native_title`, precedence custom > ai > summary). Session-start usually uses the prompt's first words; the `stop` handler's `refresh_native_title` upgrades it and updates the durable row (`MemoryRepo::set_title`) so restarts keep it. A `/rename` overrides the title in Ollama mode too.
+- **Task line**: `{"type":"last-prompt","lastPrompt":…}`, else the latest turn's text, squeezed by `collector::short_line`. Also the fallback when an Ollama call fails.
+- **Search**: `MemoryRepo::keyword_search` (word overlap over prompt/title/project, `distance = 1 - score` so the overlay's badge works). In Ollama mode, rows with an all-zero vector (written while Ollama was unavailable) are merged in via keyword search, and a failed query embed falls back to keyword search instead of returning `[]`.
+
+These transcript keys were confirmed against a real transcript; read them with `read_lines_from_start`, never the shared tail checkpoint.
 
 ### Tasks (the Kanban board)
 
 `tasks.rs`: a `Task` is `{id, title, stage, created_at_ms}`; `TaskStore` also holds `assignments` (session id → task id; absent = unassigned, shown in the board's tray). Assignment is **always an explicit user action** (drag or ▾ menu) — never inferred. Project/tool on a task card are derived from its sessions, not stored. Durable in `tasks.json` (same atomic-write pattern as `EndedSessions`).
 
-**Rollup is backend-owned and edge-triggered** (`TaskStore::rollup`, driven by `tasks::run_rollup` on every engine diff): a task moves to `Done` at the moment all its live sessions *become* settled (`Done` or `Idle`), and back to `InProgress` when a settled `Done` task gets a live session again. Edge-triggering (not "all done ⇒ Done" on every diff) is deliberate: it stops a manual drag out of Done from bouncing straight back. After a restart the first observation of a task only records its state (reconstruction re-adds sessions gradually), except that a `Done` task found with a live session is pulled back to `InProgress`. A delete of a session drops its assignment; deleting a task orphans its sessions.
+**Columns are user-editable, per board** (`BoardColumns` in `TasksSnapshot.columns`, keyed by board id): add, rename, recolor, reorder, delete — `/boards/{id}/columns…` routes in `api.rs`, the header ⋯ menu (`ColumnMenu.tsx`) and "+ Add column" on the board. `Task.stage` is a column id (a plain string). A board with no stored layout uses `default_columns` (sent in every snapshot so the frontend never hard-codes it), whose ids `backlog`/`todo`/`inprogress`/`done` are exactly what the old fixed `Stage` enum serialized to — pre-columns `tasks.json` files load unchanged. Ids are slugs fixed at creation, so rename never touches tasks. Deleting a column requires a `move_tasks_to` target and refuses the last column. Nothing in the backend or frontend may compare a stage to a literal column id: behaviour hangs off **roles** instead, all display-only — `done` (its cards are dimmed), `active` (gets the strong accent), `intake` (quick-add's column; `POST /tasks` with no `stage` uses it, else the first column). Deleting a column unsets any role it had rather than guessing a successor. There is no per-column WIP limit (the old In Progress badge was removed on purpose).
+
+**Task directories.** A task can carry `directories` (edited from the card's ⌂ button, `PATCH /tasks/:id {directories}` — validated server-side: `~` expanded, must be an existing absolute dir, deduped). "Start a new session" from the task (`POST /terminals/tasks/:id`, `api::task_launch_dirs`) runs `claude` in the first one that still exists and passes the rest as `--add-dir`, pre-trusting each; with none attached it falls back to the last session's cwd as before.
+
+**Task stages are manual-only.** A task moves between columns only when the user drags it (or uses the menu) — session state never moves a task. (There used to be an automatic, edge-triggered "all sessions settled ⇒ Done / live session ⇒ In Progress" rollup; it was removed at the user's request — don't reintroduce it.) A delete of a session drops its assignment; deleting a task orphans its sessions.
 
 ### Ticket trackers (GitHub issues → tasks)
 
 `trackers/mod.rs` is a **tracker-agnostic** layer; `trackers/github.rs` is the only GitHub-specific code. Tasks (`Task.ticket: Option<TicketRef>`), the API (`/trackers…`, `/tickets…`), the background state refresher and the whole frontend (`TicketsPanel.tsx`, the task card's ticket chip) only see the neutral types (`Ticket`, `TicketRef`, `ProviderInfo`, `ConnectionStatus`). The connect form is rendered from `ProviderInfo.auth_fields`, so the UI never special-cases a provider.
 
 - **Adding a tracker** (Linear, Jira, GitLab, …): implement `TicketProvider` in a new `trackers/<name>.rs` and add one line to `TrackerRegistry::default_providers`. Nothing else changes. Test the generic pipeline against `trackers::fake::FakeProvider`, and the provider itself against a local axum mock (see `github.rs` tests).
-- **Read-only, explicit import.** Nothing is written to a tracker. A ticket becomes a task only via the panel's "Add" (→ To Do) or a drag onto a column. Import is idempotent per `(board, provider, key)`. `run_ticket_refresher` (every 10 min, `SESSIONBOARD_TICKET_REFRESH_SECS` to shorten) updates `TicketRef.state` for display only. It **never** moves a task's stage.
+- **Read-only, explicit import.** Nothing is written to a tracker. A ticket becomes a task only via the panel's "Add" (→ the board's `intake` column, same as quick-add) or a drag onto a column. Import is idempotent per `(board, provider, key)`. `run_ticket_refresher` (every 10 min, `SESSIONBOARD_TICKET_REFRESH_SECS` to shorten) updates `TicketRef.state` for display only. It **never** moves a task's stage.
 - **Secrets live only in the OS keychain** (`KeychainCredentials`, service `taisk`, account `<provider>:<field>`), never in `trackers.json`, which only maps board → linked containers. `SESSIONBOARD_EPHEMERAL_CREDENTIALS=1` swaps in an in-memory store (the e2e harness sets it). On Linux containers keyutils may refuse writes, which is expected; the app targets macOS Keychain.
 - **GitHub auth:** a token pasted into taisk wins; otherwise `gh auth token` is reused (common install paths are tried explicitly because a Finder-launched app has a minimal PATH). List requests use ETags, so re-listing unchanged repos costs nothing against the rate limit. `SESSIONBOARD_GITHUB_API` points the provider at a fake GitHub for e2e.
 - **First session of a ticket task** starts `claude` with `session_prompt(ticket)` (key, title and URL) as its initial prompt. Later sessions on the same task start blank.
@@ -143,4 +157,4 @@ If a session still doesn't show up, check `~/.claude/projects/<sanitized-cwd>/<s
 
 ### Shortcut kit (global hotkeys)
 
-`src-tauri/src/shortcuts.rs` registers system-wide hotkeys (tauri-plugin-global-shortcut): **⌥⌘N** opens the quick-add popup (type a title → Enter; with >1 board a keyboard-only picker follows — ↑↓/jk/1-9, Enter, Esc back), **⌥⌘L** opens a read-only floating task list grouped by stage. Change the combos via `QUICK_ADD_KEYS`/`PEEK_KEYS`. Both popups are hidden windows (`quick-add`, `peek`) loading the normal frontend on `#/quick-add` / `#/peek` (routed in `src/main.tsx`, views in `QuickAdd.tsx`/`TaskPeek.tsx`), talking to the engine over the usual HTTP/WS API; they hide on blur and the shell emits `shortcut:shown` to reset/refetch. A tray icon keeps the app alive: closing the main window only hides it, quit via tray or ⌘Q. New tasks land in **To Do**.
+`src-tauri/src/shortcuts.rs` registers system-wide hotkeys (tauri-plugin-global-shortcut): **⌥⌘N** opens the quick-add popup (type a title → Enter; with >1 board a keyboard-only picker follows — ↑↓/jk/1-9, Enter, Esc back), **⌥⌘L** opens a read-only floating task list grouped by stage. Change the combos via `QUICK_ADD_KEYS`/`PEEK_KEYS`. Both popups are hidden windows (`quick-add`, `peek`) loading the normal frontend on `#/quick-add` / `#/peek` (routed in `src/main.tsx`, views in `QuickAdd.tsx`/`TaskPeek.tsx`), talking to the engine over the usual HTTP/WS API; they hide on blur and the shell emits `shortcut:shown` to reset/refetch. A tray icon keeps the app alive: closing the main window only hides it, quit via tray or ⌘Q. New tasks land in the board's quick-add (`intake`) column — **To Do** by default.

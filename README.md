@@ -27,7 +27,7 @@ You open a terminal, then Claude Desktop, then three more sessions chasing three
 
 **taisk** watches every Claude Code session (CLI and Desktop), turns each into a live card, and lets *you* file them under tasks on a Kanban board (**Backlog → To Do → In Progress → Done**). Session state is driven by Claude Code's own hooks, so it's real state — not polling and vibes.
 
-No cloud. No accounts. No API keys. Every model call runs on your machine through [Ollama](https://ollama.com).
+No cloud. No accounts. No API keys. With [Ollama](https://ollama.com) installed, every model call runs on your machine; without it, taisk uses Claude Code's own session titles and keyword search instead — nothing extra to install.
 
 ## Features
 
@@ -88,7 +88,7 @@ Works on Apple Silicon and Intel Macs running macOS 12 or later.
 **1. Install the prerequisites** (skip any you already have)
 
 ```bash
-brew install --cask ollama-app      # local models; or download from ollama.com
+brew install --cask ollama-app      # optional: local models; or download from ollama.com
 ```
 
 [Claude Code](https://claude.com/claude-code) must be installed too. It's the thing taisk watches.
@@ -101,11 +101,13 @@ brew install --cask omrico94/taisk/taisk
 
 That taps `omrico94/homebrew-taisk` and installs `taisk.app` into `/Applications`. The app isn't notarized yet, so the cask clears macOS's quarantine flag for you.
 
-**3. Pull the two small models taisk uses**
+**3. (Optional) Pull the two small models taisk uses**
 
 ```bash
 ollama pull nomic-embed-text && ollama pull qwen2.5:1.5b
 ```
+
+Skip steps 1 and 3 if you'd rather not run Ollama. taisk detects that at launch and switches to **Claude-native** mode: cards take the title Claude Code itself generates for the session (or your `/rename`), the task line shows your latest prompt, and ⌘K search matches keywords instead of meaning. The toolbar shows which mode is active. Set `TAISK_INFERENCE=ollama` or `native` to force one.
 
 **4. Launch it**
 
@@ -134,7 +136,7 @@ taisk's hooks stay in `~/.claude/settings.json` after uninstalling. They fail si
 |---|---|
 | macOS says the app "can't be opened" | Right-click taisk in `/Applications` → **Open** once, or run `xattr -cr /Applications/taisk.app` |
 | `brew` can't find the cask | Run `brew update`, or `brew tap omrico94/taisk` first |
-| Sessions show up with crude titles | Ollama isn't running or the two models aren't pulled (step 3) |
+| Sessions show up with crude titles | In Claude-native mode the title upgrades to Claude's own after the first reply. With Ollama, check it's running and both models are pulled (step 3) |
 | A session never appears | It must have sent at least one prompt, and taisk must have been launched at least once so its hooks are registered |
 
 ### Build from source
@@ -146,7 +148,7 @@ taisk's hooks stay in `~/.claude/settings.json` after uninstalling. They fail si
 | Xcode Command Line Tools | native build tooling | `xcode-select --install` |
 | Rust (stable) | backend + Tauri shell | [rustup.rs](https://rustup.rs) |
 | Node.js 20.19+ | frontend build (Vite 7) | `brew install node` |
-| Ollama | local embeddings + summaries | `brew install ollama` |
+| Ollama (optional) | local embeddings + summaries; without it taisk runs in Claude-native mode | `brew install ollama` |
 | Claude Code | the thing being watched | [claude.com/claude-code](https://claude.com/claude-code) |
 
 ### Step by step
@@ -156,7 +158,7 @@ taisk's hooks stay in `~/.claude/settings.json` after uninstalling. They fail si
 git clone https://github.com/omrico94/taisk.git
 cd taisk
 
-# 2. Start Ollama and pull the two small models taisk uses
+# 2. (Optional) Start Ollama and pull the two small models taisk uses
 ollama serve &                     # skip if the Ollama app is already running
 ollama pull nomic-embed-text       # embeddings for semantic search
 ollama pull qwen2.5:1.5b           # session titles + summaries
@@ -189,7 +191,7 @@ The bundle lands in `src-tauri/target/release/bundle/`.
 | Symptom | Fix |
 |---|---|
 | `cargo: command not found` in a fresh shell | `source ~/.cargo/env` |
-| Sessions show up but with crude titles | Ollama isn't running or `qwen2.5:1.5b` isn't pulled |
+| Sessions show up but with crude titles | Claude-native mode: the title upgrades after the first reply. Ollama mode: check Ollama is running and `qwen2.5:1.5b` is pulled |
 | A session never appears | It must have sent at least one prompt; check `~/.claude/projects/<cwd>/<session>.jsonl` exists |
 | Shortcut does nothing | Another app owns `⌥⌘N` / `⌥⌘L`. Change `QUICK_ADD_KEYS` / `PEEK_KEYS` in `src-tauri/src/shortcuts.rs`, or use the tray menu |
 | Port 37888 busy | Something else is using the engine's local API port (`API_PORT` in `src-tauri/src/lib.rs`) |
@@ -205,7 +207,7 @@ flowchart LR
 
     subgraph Engine["core-engine (Rust, inside the app)"]
         ORCH["orchestrator<br/>hook → event"] --> SM["state machine<br/>single-owner actor"]
-        SM --> TASKS["TaskHub<br/>tasks.json + rollup"]
+        SM --> TASKS["TaskHub<br/>tasks.json"]
         ORCH --> SUM["summarize"]
         SUM <--> OLL["Ollama<br/>(local)"]
         SUM --> LDB[("LanceDB<br/>memories")]
@@ -224,7 +226,7 @@ flowchart LR
 1. **Hook fires.** taisk registers Claude Code hooks (`SessionStart`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Notification`, `Stop`, `SessionEnd`). Each invokes `hook-bridge`, which reads the payload from stdin, writes it to a Unix socket, and exits in milliseconds. It fails silently if the app isn't running, so it can never break a real session.
 2. **Orchestrator** maps the hook to a `SessionEvent`. On `session-start` it waits for the transcript, extracts the first prompt, then asks Ollama for a title and summary *off the critical path* — the card shows up as "Starting…" immediately.
 3. **State machine.** One tokio actor owns every live session. Every mutation goes through a single `transition(state, event)` function (table-tested for every pair) and broadcasts a diff. No shared mutexes, no scattered "just set it to Working here too".
-4. **Tasks.** `TaskHub` persists tasks and session→task assignments and owns the *Done* rollup. Assignment is always an explicit user action — never inferred.
+4. **Tasks.** `TaskHub` persists tasks and session→task assignments. Task stages change only when the user moves a task. Assignment is always an explicit user action — never inferred.
 5. **API.** An axum server on `127.0.0.1:37888` exposes REST (`/sessions`, `/tasks`, `/search`, approve/reject/reply) plus a WebSocket that streams session diffs and task snapshots.
 6. **UI.** A React + Zustand app subscribes to the WebSocket, with polling as a safety net for the packaged webview.
 

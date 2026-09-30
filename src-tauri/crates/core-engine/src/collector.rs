@@ -201,6 +201,84 @@ pub fn extract_latest_activity(lines: &[String]) -> Option<String> {
     None
 }
 
+/// Claude Code's own name for the session, read straight from the transcript
+/// — the "Claude-native" alternative to asking Ollama for a title. Confirmed
+/// against a real transcript: Claude Code appends
+/// `{"type":"ai-title","aiTitle":"…"}` on its own shortly after the first
+/// turn (it can be rewritten later, so the latest wins), `/rename` appends
+/// `{"type":"custom-title","customTitle":"…"}`, and compaction appends
+/// `{"type":"summary","summary":"…"}`. An explicit rename beats Claude's
+/// generated title, which beats a compaction summary.
+pub fn extract_native_title(lines: &[String]) -> Option<String> {
+    if let Some(custom) = extract_custom_title(lines) {
+        return Some(custom);
+    }
+    let mut summary = None;
+    for line in lines.iter().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let field = match value.get("type").and_then(|t| t.as_str()) {
+            Some("ai-title") => "aiTitle",
+            Some("summary") if summary.is_none() => "summary",
+            _ => continue,
+        };
+        let Some(text) = value.get(field).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else { continue };
+        if field == "aiTitle" {
+            return Some(text.to_string());
+        }
+        summary = Some(text.to_string());
+    }
+    summary
+}
+
+/// Just the user's explicit `/rename`, if any (latest wins) — the one
+/// Claude-native title that overrides even an Ollama-written one.
+pub fn extract_custom_title(lines: &[String]) -> Option<String> {
+    for line in lines.iter().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if value.get("type").and_then(|t| t.as_str()) != Some("custom-title") {
+            continue;
+        }
+        if let Some(text) = value.get("customTitle").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
+/// The latest user prompt, as Claude Code itself records it
+/// (`{"type":"last-prompt","lastPrompt":"…"}`, confirmed against a real
+/// transcript) — used for the "current task" line when there's no Ollama to
+/// summarize recent activity.
+pub fn extract_last_prompt(lines: &[String]) -> Option<String> {
+    for line in lines.iter().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if value.get("type").and_then(|t| t.as_str()) != Some("last-prompt") {
+            continue;
+        }
+        if let Some(text) = value.get("lastPrompt").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
+/// Squeezes free text (a prompt, an assistant reply) into a one-line card
+/// label: first non-empty line, whitespace collapsed, cut at a word boundary
+/// to at most `max_chars` characters with a trailing `…`.
+pub fn short_line(text: &str, max_chars: usize) -> String {
+    let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let collapsed = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let cut: String = collapsed.chars().take(max_chars.saturating_sub(1)).collect();
+    let cut = match cut.rfind(' ') {
+        Some(i) if i > 0 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{}…", cut.trim_end_matches([',', '.', ';', ':', ' ']))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptRow {
     pub role: String,
@@ -638,6 +716,52 @@ mod tests {
     fn returns_none_when_no_user_line_present() {
         let lines = vec![serde_json::json!({"type":"assistant","message":{"content":"hi"}}).to_string()];
         assert_eq!(extract_initiating_prompt(&lines), None);
+    }
+
+    /// Real-shaped lines, copied from an actual Claude Code transcript.
+    fn native_lines() -> Vec<String> {
+        vec![
+            serde_json::json!({"type":"user","message":{"content":"make ollama optional"}}).to_string(),
+            serde_json::json!({"type":"ai-title","aiTitle":"Old title","sessionId":"s1"}).to_string(),
+            serde_json::json!({"type":"last-prompt","lastPrompt":"first prompt","leafUuid":"u1","sessionId":"s1"}).to_string(),
+            serde_json::json!({"type":"ai-title","aiTitle":"Ollama fallback with Claude native data","sessionId":"s1"}).to_string(),
+            serde_json::json!({"type":"last-prompt","lastPrompt":"now add keyword search","leafUuid":"u2","sessionId":"s1"}).to_string(),
+        ]
+    }
+
+    #[test]
+    fn extract_native_title_takes_the_latest_ai_title() {
+        assert_eq!(extract_native_title(&native_lines()), Some("Ollama fallback with Claude native data".to_string()));
+    }
+
+    #[test]
+    fn extract_native_title_prefers_an_explicit_rename_over_a_later_ai_title() {
+        let mut lines = native_lines();
+        lines.insert(1, serde_json::json!({"type":"custom-title","customTitle":"My rename","sessionId":"s1"}).to_string());
+        assert_eq!(extract_native_title(&lines), Some("My rename".to_string()));
+    }
+
+    #[test]
+    fn extract_native_title_falls_back_to_a_compaction_summary() {
+        let lines = vec![
+            serde_json::json!({"type":"summary","summary":"Auth refactor","leafUuid":"u1"}).to_string(),
+            serde_json::json!({"type":"user","message":{"content":"hi"}}).to_string(),
+        ];
+        assert_eq!(extract_native_title(&lines), Some("Auth refactor".to_string()));
+        assert_eq!(extract_native_title(&lines[1..]), None);
+    }
+
+    #[test]
+    fn extract_last_prompt_takes_the_latest() {
+        assert_eq!(extract_last_prompt(&native_lines()), Some("now add keyword search".to_string()));
+        assert_eq!(extract_last_prompt(&native_lines()[..1]), None);
+    }
+
+    #[test]
+    fn short_line_keeps_the_first_line_and_cuts_at_a_word_boundary() {
+        assert_eq!(short_line("  fix the\tbug  \nsecond line", 80), "fix the bug");
+        assert_eq!(short_line("refactor the auth middleware to async", 20), "refactor the auth…");
+        assert_eq!(short_line("", 20), "");
     }
 
     #[test]

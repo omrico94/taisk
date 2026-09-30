@@ -63,7 +63,8 @@ export function QuickAdd() {
   const submit = async (board: Board) => {
     setStatus("saving");
     try {
-      await createTask(title.trim(), "todo", board.id);
+      // No stage: the backend files it in the board's quick-add column.
+      await createTask(title.trim(), null, board.id);
       try {
         localStorage.setItem(LAST_BOARD_KEY, board.id);
       } catch {

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, Mutex};
 
-use crate::summarize::{refresh_task_summary, summarize_session, SummarizeConfig};
+use crate::summarize::{refresh_native_title, refresh_task_summary, summarize_session, SummarizeConfig};
 use crate::collector::{
     extract_entrypoint, extract_initiating_prompt, extract_latest_activity, extract_usage_metrics, list_subagents,
     project_name_from_cwd, read_lines_from_start, tail_new_lines, transcript_path, TailCheckpoints,
@@ -650,7 +650,7 @@ async fn assign_when_visible(engine: EngineHandle, tasks: TaskHub, session_id: S
     while tokio::time::Instant::now() < deadline {
         let sessions = engine.snapshot().await;
         if sessions.iter().any(|s| s.id == session_id) {
-            tasks.assign(&session_id, Some(&task_id), &sessions).await;
+            tasks.assign(&session_id, Some(&task_id)).await;
             return;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -802,10 +802,12 @@ async fn handle_hook_event(
             let deadline = tokio::time::Instant::now() + orch_config.transcript_wait;
             let mut prompt = None;
             let mut transcript_entrypoint = None;
+            let mut transcript_lines = Vec::new();
             while prompt.is_none() && tokio::time::Instant::now() < deadline {
                 if let Ok(lines) = read_lines_from_start(&path) {
                     transcript_entrypoint = extract_entrypoint(&lines);
                     prompt = extract_initiating_prompt(&lines);
+                    transcript_lines = lines;
                 }
                 if prompt.is_none() {
                     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -832,7 +834,7 @@ async fn handle_hook_event(
             orch_config.boards.assign(&session_id, &board);
             engine.dispatch(EngineCommand::SetBoard { id: session_id.clone(), board: board.clone() }).await;
 
-            let _ = summarize_session(engine, repo, ollama, cat_config, &session_id, &project, &cwd, "Claude Code", &prompt).await;
+            summarize_session(engine, repo, ollama, cat_config, &session_id, &project, &cwd, "Claude Code", &prompt, &transcript_lines).await;
         }
         // `idle_prompt` is deliberately excluded (see the `is_idle_prompt`
         // computation above) — it means "sitting idle," not "blocked on
@@ -937,8 +939,14 @@ async fn handle_hook_event(
                     let _ = cp.save();
                     lines
                 };
-                if let Some(activity) = extract_latest_activity(&lines) {
-                    refresh_task_summary(engine, ollama, cat_config, &session_id, &activity).await;
+                // Claude Code's own title / latest prompt can sit anywhere in
+                // the file (not just in what's new since the last `stop`), so
+                // read it whole — never through the shared tail checkpoint.
+                let all_lines = read_lines_from_start(&path).unwrap_or_default();
+                let activity = extract_latest_activity(&lines);
+                refresh_task_summary(engine, ollama, cat_config, &session_id, activity.as_deref(), &all_lines).await;
+                if let Some(current) = engine.snapshot().await.into_iter().find(|s| s.id == session_id) {
+                    refresh_native_title(engine, repo, cat_config, &session_id, &current.title, &all_lines).await;
                 }
 
                 // Re-derived fresh from the whole file on every "stop" (see
@@ -1771,7 +1779,7 @@ mod tests {
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
-        let task = tasks.create("Billing", crate::tasks::Stage::Todo).await.expect("task should be created");
+        let task = tasks.create("Billing", crate::tasks::stage::TODO).await.expect("task should be created");
 
         tokio::spawn(run(
             engine.clone(),
@@ -2792,5 +2800,72 @@ mod tests {
         let snapshot = engine.snapshot().await;
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].board, "work");
+    }
+
+    /// Claude-native mode end to end: Claude Code writes its own `ai-title`
+    /// after the first turn, and the `stop` hook must adopt it (plus the
+    /// latest prompt as the task line) — durably, so a restart restores it.
+    #[tokio::test]
+    async fn native_backend_adopts_claudes_title_on_stop_and_keeps_it_across_restart() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let cwd = "/Users/dev/ml-run";
+        let session_id = "n1";
+        let path = transcript_path(claude_dir.path(), cwd, session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::json!({"type":"user","message":{"role":"user","content":"tune the LR schedule for the run"}}).to_string() + "\n").unwrap();
+
+        let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
+        let engine = EngineHandle::spawn();
+        let ollama = crate::ollama::fake::FailingOllamaClient;
+        let cat_config = SummarizeConfig { backend: crate::summarize::InferenceBackend::Native, ..SummarizeConfig::default() };
+        let orch_config = OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
+            ended_sessions_path: app_dir.path().join("ended-sessions.json"),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            dismissed_sessions_path: app_dir.path().join("dismissed-sessions.json"),
+            ..OrchestratorConfig::default()
+        };
+        let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
+        let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
+        let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+        let send = |event: &str, payload: serde_json::Value| HookEvent { event: event.into(), payload };
+
+        handle_hook_event(
+            send("session-start", real_session_start_payload(session_id, cwd, &path, "startup")),
+            &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions,
+        )
+        .await;
+        let card = engine.snapshot().await.into_iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(card.title, "tune the LR schedule", "no Claude title yet: first words of the prompt");
+
+        let mut transcript = std::fs::read_to_string(&path).unwrap();
+        for line in [
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":"Trying cosine decay."}}),
+            serde_json::json!({"type":"ai-title","aiTitle":"LR schedule tuning","sessionId":session_id}),
+            serde_json::json!({"type":"last-prompt","lastPrompt":"add warmup too","leafUuid":"u2","sessionId":session_id}),
+        ] {
+            transcript.push_str(&(line.to_string() + "\n"));
+        }
+        std::fs::write(&path, transcript).unwrap();
+        let mut stop = real_stop_payload(session_id, "end_turn");
+        stop["cwd"] = cwd.into();
+        stop["transcript_path"] = path.to_string_lossy().to_string().into();
+        handle_hook_event(send("stop", stop), &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
+            .await;
+
+        let card = engine.snapshot().await.into_iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(card.title, "LR schedule tuning");
+        assert_eq!(card.desc, "add warmup too");
+
+        let restarted = EngineHandle::spawn();
+        reconstruct_live_sessions(&restarted, &repo, &orch_config, &EndedSessions::load(&orch_config.ended_sessions_path), &WaitingSessions::load(&orch_config.waiting_sessions_path), &DismissedSessions::load(&orch_config.dismissed_sessions_path))
+            .await;
+        let card = restarted.snapshot().await.into_iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(card.title, "LR schedule tuning");
     }
 }

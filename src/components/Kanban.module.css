@@ -67,15 +67,6 @@
   text-transform: uppercase;
 }
 .columnCount { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); }
-.wipBadge {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: var(--tk-lime-wash);
-  color: var(--tk-lime);
-}
-.wipOver { background: rgba(255, 92, 92, 0.12); color: var(--tk-danger-text); }
 
 .columnBody {
   flex: 1;
@@ -92,6 +83,119 @@
 .columnHot {
   background: rgba(200, 255, 61, 0.05);
   box-shadow: inset 0 0 0 1.5px rgba(200, 255, 61, 0.45);
+}
+
+/* Drop marker while reordering columns (dragging a header). */
+.columnReorderTarget { box-shadow: inset 2px 0 0 var(--tk-lime); border-radius: 14px; }
+.columnHeader[draggable="true"] { cursor: grab; }
+.columnRename {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--tk-raised);
+  border: 1px solid var(--tk-lime);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  outline: none;
+}
+.columnMenuButton {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0.55;
+}
+.columnHeader:hover .columnMenuButton,
+.columnMenuButton:focus-visible { opacity: 1; }
+.columnMenuButton:hover { background: rgba(255, 255, 255, 0.08); color: var(--tk-ink); }
+
+/* Ghost column at the end of the board. */
+.addColumn {
+  flex: 0 0 auto;
+  width: 104px;
+  padding-top: 30px;
+}
+.addColumnOpen { width: 240px; }
+.columnError { font-size: 11px; color: var(--tk-danger-text); padding: 6px 8px 2px; }
+
+/* ---------- Column menu (reuses .assignMenu's shell) ---------- */
+.assignMenu.columnMenu { max-height: none; overflow: visible; display: flex; flex-direction: column; gap: 2px; }
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--tk-ink);
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.menuItem:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+.menuItem:disabled { opacity: 0.4; cursor: default; }
+.menuItemDanger { color: var(--tk-danger-text); }
+.menuRow { display: flex; gap: 2px; }
+.menuCheck { width: 12px; font-size: 11px; color: var(--tk-lime); flex: none; }
+.menuDivider { height: 1px; background: var(--border-09); margin: 4px 2px; }
+.menuField {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--tk-ink);
+}
+.menuSelect {
+  min-width: 0;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: var(--surface-card);
+  border: 1px solid var(--tk-line-hi);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+.menuSelect { max-width: 130px; }
+.menuSelect:focus { border-color: var(--tk-lime); }
+.swatches { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px; }
+.swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.swatchOn { border-color: var(--tk-ink); box-shadow: 0 0 0 2px var(--tk-raised) inset; }
+.menuActions { display: flex; justify-content: flex-end; gap: 6px; padding: 6px 4px 2px; }
+.menuActions .addCancel { padding: 6px 10px; }
+.menuDanger {
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--tk-danger-text);
+  background: rgba(255, 92, 92, 0.12);
+  color: var(--tk-danger-text);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
 }
 
 .columnFooter { flex: 0 0 auto; }
@@ -243,6 +347,53 @@
 .taskDelete { opacity: 0; color: var(--tk-dim); transition: opacity 0.15s, background 0.15s, color 0.15s; }
 .taskCard:hover .taskDelete { opacity: 1; }
 .taskDelete.iconDelete:hover { background: rgba(255, 92, 92, 0.12); color: var(--tk-danger-text); }
+
+.taskDirsButton {
+  opacity: 0;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--tk-line-hi);
+  border-radius: 5px;
+  transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+  font-size: 12px;
+}
+.taskCard:hover .taskDirsButton, .taskDirsButtonOn { opacity: 1; }
+.taskDirsButton:hover, .taskDirsButtonOn { color: var(--tk-lime); border-color: var(--tk-lime); }
+
+/* ---------- Task directories ---------- */
+.dirList { display: flex; flex-wrap: wrap; gap: 5px; }
+.dirChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 4px 2px 7px;
+  border: 1px solid var(--tk-line-hi);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.dirChipPrimary { color: var(--text-primary); border-color: var(--tk-lime); }
+.dirChipName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dirChip .iconButton { width: 14px; height: 14px; font-size: 9px; }
+.dirChip .iconButton:hover { color: var(--tk-danger-text); }
+.dirAddRow { display: flex; gap: 5px; margin-top: 6px; }
+.dirInput {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--tk-line-hi);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+}
+.dirInput:focus { border-color: var(--tk-lime); }
+.dirError { margin-top: 4px; font-size: 11px; color: var(--tk-danger-text); }
+.dirHint { margin-top: 4px; font-size: 10.5px; color: var(--text-faint); }
 
 .taskStart {
   opacity: 0;

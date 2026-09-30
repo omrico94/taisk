@@ -21,13 +21,13 @@ use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 
 use crate::boards::{Board, BoardStore, DEFAULT_BOARD_ID};
-use crate::summarize::SummarizeConfig;
+use crate::summarize::{InferenceBackend, SummarizeConfig};
 use crate::collector::{parse_transcript_for_display, transcript_path, TranscriptRow};
 use crate::engine::{EngineCommand, EngineHandle, SessionView};
-use crate::memory_repo::{MemoryRepo, PurgeScope};
+use crate::memory_repo::{Memory, MemoryRepo, PurgeScope, ScoredMemory};
 use crate::ollama::OllamaClient;
 use crate::orchestrator::{DismissedSessions, WaitingSessions};
-use crate::tasks::{Stage, Task, TaskHub, TasksSnapshot};
+use crate::tasks::{Column, ColumnPatch, RolesPatch, Stage, Task, TaskError, TaskHub, TasksSnapshot};
 use crate::terminal::{PtyInfo, PtyOutput, SpawnSpec, TerminalManager};
 use crate::trackers::{Link, TicketRef, TicketsResponse, TrackerOverview, Trackers};
 
@@ -73,6 +73,10 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(ws_events))
         .route("/boards", get(list_boards).post(create_board))
         .route("/boards/{id}", patch(update_board).delete(delete_board))
+        .route("/boards/{id}/columns", post(add_column))
+        .route("/boards/{id}/columns/order", put(reorder_columns))
+        .route("/boards/{id}/columns/roles", put(set_column_roles))
+        .route("/boards/{id}/columns/{col}", patch(update_column).delete(delete_column))
         .route("/tasks", get(get_tasks).post(create_task))
         .route("/tasks/{id}", patch(update_task).delete(delete_task))
         .route("/sessions/{id}/task", put(assign_session))
@@ -92,6 +96,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tickets", get(list_tickets))
         .route("/tickets/import", post(import_ticket))
         .route("/search", get(search))
+        .route("/inference", get(get_inference))
         .route("/memories", delete(purge_memories))
         // Frontend (Tauri webview / Vite dev server) and this API are
         // different origins (different ports), so browser fetch() calls
@@ -195,16 +200,24 @@ async fn open_task_terminal(
     let snap = state.tasks.snapshot().await;
     let task = snap.tasks.iter().find(|t| t.id == task_id).ok_or(StatusCode::NOT_FOUND)?.clone();
     let has_sessions = snap.assignments.values().any(|t| *t == task_id);
-    let cwd = usable_cwd(body.and_then(|Json(b)| b.cwd));
+    let (cwd, add_dirs) = task_launch_dirs(&task.directories, body.and_then(|Json(b)| b.cwd));
     let mut env = board_env(&state, &task.board);
     env.push(("SESSIONBOARD_TASK_ID".to_string(), task_id.clone()));
     trust_project_dir(&state, &task.board, &cwd);
+    let mut args = Vec::new();
+    for dir in add_dirs {
+        trust_project_dir(&state, &task.board, &dir);
+        args.push("--add-dir".to_string());
+        args.push(dir);
+    }
+    // Positional prompt goes after the flags.
+    args.extend(ticket_prompt(&state, task.ticket.as_ref(), has_sessions));
     let pty_id = state
         .terminal
         .spawn(SpawnSpec {
             cwd,
             program: state.claude_bin.clone(),
-            args: ticket_prompt(&state, task.ticket.as_ref(), has_sessions).into_iter().collect(),
+            args,
             env,
             session_id: None,
             task_id: Some(task_id),
@@ -223,6 +236,42 @@ async fn open_task_terminal(
 fn ticket_prompt(state: &AppState, ticket: Option<&TicketRef>, has_sessions: bool) -> Option<String> {
     let ticket = ticket.filter(|_| !has_sessions)?;
     Some(state.trackers.registry.get(&ticket.provider)?.session_prompt(ticket))
+}
+
+/// Where a session started from a task runs: the task's first attached
+/// directory that still exists is the cwd and every other existing one is
+/// handed to `claude --add-dir`. With nothing attached (or nothing left on
+/// disk) it falls back to `fallback_cwd` (the frontend sends the task's most
+/// recent session's cwd), then the home dir, same as before directories.
+fn task_launch_dirs(directories: &[String], fallback_cwd: Option<String>) -> (String, Vec<String>) {
+    let mut existing = directories.iter().filter(|d| std::path::Path::new(d).is_dir()).cloned();
+    match existing.next() {
+        Some(cwd) => (cwd, existing.collect()),
+        None => (usable_cwd(fallback_cwd), vec![]),
+    }
+}
+
+/// Validates directories typed into a task: `~` expanded, trailing slashes
+/// dropped, duplicates removed; each must be an existing absolute directory.
+fn normalize_task_directories(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in raw.iter().map(|d| d.trim()).filter(|d| !d.is_empty()) {
+        let path = crate::boards::expand_home(entry);
+        if !path.is_absolute() {
+            return Err(format!("{entry} must be an absolute path (or start with ~/)"));
+        }
+        if !path.is_dir() {
+            return Err(format!("{entry} is not an existing directory"));
+        }
+        let mut s = path.to_string_lossy().to_string();
+        while s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        }
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 /// A session on a non-default board lives under that board's own Claude config
@@ -351,7 +400,8 @@ async fn get_tasks(State(state): State<AppState>) -> Json<TasksSnapshot> {
 #[derive(Deserialize)]
 struct CreateTaskBody {
     title: String,
-    stage: Stage,
+    /// Omitted means the board's intake column (quick-add).
+    stage: Option<Stage>,
     /// Board the task belongs to; omitted means the default board.
     board: Option<String>,
 }
@@ -361,7 +411,7 @@ async fn create_task(State(state): State<AppState>, Json(body): Json<CreateTaskB
     if state.boards.get(board).is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    state.tasks.create_on_board(&body.title, body.stage, board).await.map(Json).ok_or(StatusCode::BAD_REQUEST)
+    state.tasks.create_on_board(&body.title, body.stage.as_deref(), board).await.map(Json).ok_or(StatusCode::BAD_REQUEST)
 }
 
 #[derive(Serialize)]
@@ -536,6 +586,7 @@ struct ImportBody {
 }
 
 /// Ticket → task. Idempotent: a ticket already on the board returns its task.
+/// `stage` is a column id on the board; omitted means its intake column.
 async fn import_ticket(State(state): State<AppState>, Json(body): Json<ImportBody>) -> Result<Json<Task>, (StatusCode, Json<ApiError>)> {
     let board = body.board.as_deref().unwrap_or(DEFAULT_BOARD_ID);
     if state.boards.get(board).is_none() {
@@ -543,25 +594,121 @@ async fn import_ticket(State(state): State<AppState>, Json(body): Json<ImportBod
     }
     let p = provider_of(&state, &body.provider)?;
     let ticket = p.get(state.trackers.creds.as_ref(), &body.key).await.map_err(|e| api_error(StatusCode::BAD_GATEWAY, e))?;
-    Ok(Json(state.tasks.create_from_ticket(TicketRef::from(&ticket), board, body.stage.unwrap_or(Stage::Todo)).await))
+    // No stage → the board's intake column, same as quick-add.
+    state
+        .tasks
+        .create_from_ticket(TicketRef::from(&ticket), board, body.stage.as_deref())
+        .await
+        .map(Json)
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "no such column on this board"))
 }
 
 #[derive(Deserialize)]
 struct UpdateTaskBody {
     title: Option<String>,
     stage: Option<Stage>,
+    /// Replaces the task's attached directories (see `Task::directories`).
+    directories: Option<Vec<String>>,
 }
 
 async fn update_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateTaskBody>,
-) -> StatusCode {
-    if state.tasks.update(&id, body.title.as_deref(), body.stage).await {
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_FOUND
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // Validate before touching anything so a bad path never half-applies a patch.
+    let directories = body
+        .directories
+        .as_deref()
+        .map(normalize_task_directories)
+        .transpose()
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
+    state.tasks.update(&id, body.title.as_deref(), body.stage.as_deref()).await.map_err(task_error)?;
+    if let Some(dirs) = directories {
+        state.tasks.set_directories(&id, dirs).await;
     }
+    Ok(StatusCode::OK)
+}
+
+fn task_error(e: TaskError) -> (StatusCode, Json<ApiError>) {
+    let status = match e {
+        TaskError::NotFound => StatusCode::NOT_FOUND,
+        TaskError::Invalid(_) => StatusCode::BAD_REQUEST,
+    };
+    api_error(status, e.to_string())
+}
+
+/// Column edits are scoped to a board that exists; an unknown one is a 404.
+fn require_board(state: &AppState, board: &str) -> Result<(), (StatusCode, Json<ApiError>)> {
+    match state.boards.get(board) {
+        Some(_) => Ok(()),
+        None => Err(api_error(StatusCode::NOT_FOUND, format!("no board {board:?}"))),
+    }
+}
+
+#[derive(Deserialize)]
+struct AddColumnBody {
+    name: String,
+    color: Option<String>,
+}
+
+async fn add_column(
+    State(state): State<AppState>,
+    Path(board): Path<String>,
+    Json(body): Json<AddColumnBody>,
+) -> Result<Json<Column>, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.add_column(&board, &body.name, body.color.as_deref()).await.map(Json).map_err(task_error)
+}
+
+async fn update_column(
+    State(state): State<AppState>,
+    Path((board, col)): Path<(String, String)>,
+    Json(patch): Json<ColumnPatch>,
+) -> Result<Json<Column>, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.update_column(&board, &col, &patch).await.map(Json).map_err(task_error)
+}
+
+#[derive(Deserialize)]
+struct ReorderColumnsBody {
+    ids: Vec<String>,
+}
+
+async fn reorder_columns(
+    State(state): State<AppState>,
+    Path(board): Path<String>,
+    Json(body): Json<ReorderColumnsBody>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.reorder_columns(&board, &body.ids).await.map_err(task_error)?;
+    Ok(StatusCode::OK)
+}
+
+async fn set_column_roles(
+    State(state): State<AppState>,
+    Path(board): Path<String>,
+    Json(patch): Json<RolesPatch>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.set_roles(&board, &patch).await.map_err(task_error)?;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+struct DeleteColumnQuery {
+    move_tasks_to: String,
+}
+
+/// Deletes a column; its tasks move to `?move_tasks_to=<column id>`.
+async fn delete_column(
+    State(state): State<AppState>,
+    Path((board, col)): Path<(String, String)>,
+    Query(q): Query<DeleteColumnQuery>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.delete_column(&board, &col, &q.move_tasks_to).await.map_err(task_error)?;
+    Ok(StatusCode::OK)
 }
 
 async fn delete_task(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
@@ -583,8 +730,7 @@ async fn assign_session(
     Path(id): Path<String>,
     Json(body): Json<AssignBody>,
 ) -> StatusCode {
-    let sessions = state.engine.snapshot().await;
-    if state.tasks.assign(&id, body.task_id.as_deref(), &sessions).await {
+    if state.tasks.assign(&id, body.task_id.as_deref()).await {
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
@@ -714,15 +860,37 @@ struct SearchResult {
 /// silently hiding anything below a guessed-at bar — is the fix: a
 /// low-relevance result the user can *see* is low-relevance is more useful
 /// than an empty list.
+///
+/// Claude-native mode (no Ollama) — or Ollama failing to embed the query —
+/// uses `MemoryRepo::keyword_search` instead. Rows written without Ollama
+/// carry an all-zero vector that vector search can't rank, so in Ollama mode
+/// their keyword matches are merged in behind the vector results.
 async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> Json<Vec<SearchResult>> {
-    let Ok(embedding) = state.ollama.embed(&state.config.embedding_model, &q.q).await else {
-        return Json(vec![]);
-    };
     let live_ids: HashSet<String> = state.engine.snapshot().await.into_iter().map(|s| s.id).collect();
     // Over-fetch when filtering by board so a board with few matches isn't
     // starved by other boards' rows in the global top-N.
     let fetch = if q.board.is_some() { 50 } else { 10 };
-    let results = state.repo.search(&embedding, fetch).await.unwrap_or_default();
+    let embedding = match state.config.backend {
+        InferenceBackend::Ollama => state.ollama.embed(&state.config.embedding_model, &q.q).await.ok(),
+        InferenceBackend::Native => None,
+    };
+    let keyword = state.repo.keyword_search(&q.q, fetch).await.unwrap_or_default();
+    let results = match embedding {
+        None => keyword,
+        Some(embedding) => {
+            let is_unembedded = |m: &Memory| m.embedding.iter().all(|v| *v == 0.0);
+            let mut results: Vec<ScoredMemory> = state
+                .repo
+                .search(&embedding, fetch)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| !is_unembedded(&r.memory) && r.distance.is_finite())
+                .collect();
+            results.extend(keyword.into_iter().filter(|r| is_unembedded(&r.memory)));
+            results
+        }
+    };
     Json(
         results
             .into_iter()
@@ -739,6 +907,12 @@ async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> 
             })
             .collect(),
     )
+}
+
+/// Which backend produces titles/summaries/search — lets the UI say
+/// "Ollama" vs "Claude-native" instead of assuming Ollama is installed.
+async fn get_inference(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "backend": state.config.backend.as_str() }))
 }
 
 #[derive(Deserialize)]
@@ -777,10 +951,15 @@ mod tests {
         use crate::trackers::{MemoryCredentials, TrackerLinks, TrackerRegistry};
         let p = FakeProvider::new("fake");
         p.ticket("PROJ", "PROJ-1", "Fix login", "2026-01-01T00:00:00Z");
+        p.ticket("PROJ", "PROJ-2", "Speed up search", "2026-01-02T00:00:00Z");
         Trackers::new(TrackerRegistry::new(vec![Arc::new(p)]), Arc::new(MemoryCredentials::default()), TrackerLinks::in_memory())
     }
 
     async fn spawn_test_server() -> (String, AppState) {
+        spawn_test_server_with(Arc::new(FakeOllamaClient::new("Backend / API")), SummarizeConfig::default()).await
+    }
+
+    async fn spawn_test_server_with(ollama: Arc<dyn OllamaClient>, config: SummarizeConfig) -> (String, AppState) {
         let lance_dir = tempfile::tempdir().unwrap();
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
         let claude_dir = tempfile::tempdir().unwrap();
@@ -798,8 +977,8 @@ mod tests {
         let state = AppState {
             engine: EngineHandle::spawn(),
             repo: Arc::new(repo),
-            ollama: Arc::new(FakeOllamaClient::new("Backend / API")),
-            config: Arc::new(SummarizeConfig::default()),
+            ollama,
+            config: Arc::new(config),
             claude_projects_dir,
             boards: Arc::new(BoardStore::in_memory()),
             hook_bridge_path: None,
@@ -910,7 +1089,12 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(task.stage, Stage::Todo);
+        assert_eq!(task.stage, "todo");
+        // A stage that isn't a column on the board is rejected.
+        let r = client.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "X", "stage": "nope"})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+        let r = client.patch(format!("{base}/tasks/{}", task.id)).json(&serde_json::json!({"stage": "nope"})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
 
         let r = client.patch(format!("{base}/tasks/{}", task.id)).json(&serde_json::json!({"stage": "inprogress"})).send().await.unwrap();
         assert_eq!(r.status(), 200);
@@ -923,7 +1107,7 @@ mod tests {
         let r = client.put(format!("{base}/sessions/s1/task")).json(&serde_json::json!({"task_id": "nope"})).send().await.unwrap();
         assert_eq!(r.status(), 404);
         let snap: TasksSnapshot = client.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
-        assert_eq!(snap.tasks[0].stage, Stage::InProgress);
+        assert_eq!(snap.tasks[0].stage, "inprogress");
         assert_eq!(snap.assignments.get("s1"), Some(&task.id));
         client.put(format!("{base}/sessions/s1/task")).json(&serde_json::json!({"task_id": null})).send().await.unwrap();
         assert!(state.tasks.snapshot().await.assignments.is_empty());
@@ -936,6 +1120,78 @@ mod tests {
         assert_eq!(client.delete(format!("{base}/tasks/{}", task.id)).send().await.unwrap().status(), 200);
         let snap = state.tasks.snapshot().await;
         assert!(snap.tasks.is_empty() && snap.assignments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn columns_can_be_added_edited_reordered_and_deleted() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+        let cols = |snap: &TasksSnapshot| -> Vec<String> {
+            snap.columns.get("default").unwrap_or(&snap.default_columns).columns.iter().map(|c| c.id.clone()).collect()
+        };
+
+        // Untouched board: defaults are served, nothing stored yet.
+        let snap: TasksSnapshot = client.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
+        assert!(snap.columns.is_empty());
+        assert_eq!(cols(&snap), ["backlog", "todo", "inprogress", "done"]);
+
+        // No stage: filed in the board's intake column (quick-add).
+        let quick: Task = client.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "Q"})).send().await.unwrap().json().await.unwrap();
+        assert_eq!(quick.stage, "todo");
+        state.tasks.delete(&quick.id).await;
+
+        let col: Column = client
+            .post(format!("{base}/boards/default/columns"))
+            .json(&serde_json::json!({"name": "In Review", "color": "#e07a8b"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!((col.id.as_str(), col.color.as_str()), ("in-review", "#E07A8B"));
+        let r = client.post(format!("{base}/boards/nope/columns")).json(&serde_json::json!({"name": "X"})).send().await.unwrap();
+        assert_eq!(r.status(), 404);
+        let r = client.post(format!("{base}/boards/default/columns")).json(&serde_json::json!({"name": " "})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+
+        let r = client
+            .patch(format!("{base}/boards/default/columns/in-review"))
+            .json(&serde_json::json!({"name": "Review", "color": "#7c9ce0"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let r = client
+            .patch(format!("{base}/boards/default/columns/inprogress"))
+            .json(&serde_json::json!({"color": "red"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+
+        let order = ["todo", "inprogress", "in-review", "done", "backlog"];
+        let r = client.put(format!("{base}/boards/default/columns/order")).json(&serde_json::json!({"ids": order})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = client.put(format!("{base}/boards/default/columns/order")).json(&serde_json::json!({"ids": ["todo"]})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+
+        let r = client.put(format!("{base}/boards/default/columns/roles")).json(&serde_json::json!({"done": "in-review"})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = client.put(format!("{base}/boards/default/columns/roles")).json(&serde_json::json!({"active": "nope"})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+
+        let task = state.tasks.create("A", "in-review").await.unwrap();
+        let r = client.delete(format!("{base}/boards/default/columns/in-review?move_tasks_to=in-review")).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+        let r = client.delete(format!("{base}/boards/default/columns/in-review?move_tasks_to=done")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+
+        let snap = state.tasks.snapshot().await;
+        assert_eq!(cols(&snap), ["todo", "inprogress", "done", "backlog"]);
+        let layout = &snap.columns["default"];
+        assert_eq!(layout.done, None, "the deleted column's role is unset, not guessed");
+        assert_eq!(snap.tasks.iter().find(|t| t.id == task.id).unwrap().stage, "done");
     }
 
     #[tokio::test]
@@ -970,7 +1226,7 @@ mod tests {
         use futures::SinkExt;
         let (base, state) = spawn_test_server().await;
         let client = reqwest::Client::new();
-        let task = state.tasks.create("Billing", Stage::Todo).await.unwrap();
+        let task = state.tasks.create("Billing", "todo").await.unwrap();
 
         // Unknown task -> 404, no process spawned.
         let resp = client.post(format!("{base}/terminals/tasks/nope")).send().await.unwrap();
@@ -1021,6 +1277,65 @@ mod tests {
         let bytes = B64.decode(replay["data"].as_str().unwrap()).unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains("ping"));
         state.terminal.kill_all();
+    }
+
+    #[tokio::test]
+    async fn task_directories_are_validated_and_drive_the_new_sessions_cwd_and_add_dirs() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+        let task = state.tasks.create("Multi-repo", "todo").await.unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let a_path = a.path().to_string_lossy().to_string();
+        let b_path = b.path().to_string_lossy().to_string();
+
+        for bad in [serde_json::json!(["relative/dir"]), serde_json::json!(["/definitely/not/a/dir"])] {
+            let r = client.patch(format!("{base}/tasks/{}", task.id)).json(&serde_json::json!({"directories": bad})).send().await.unwrap();
+            assert_eq!(r.status(), 400);
+        }
+        assert!(state.tasks.snapshot().await.tasks[0].directories.is_empty());
+
+        let r = client
+            .patch(format!("{base}/tasks/{}", task.id))
+            .json(&serde_json::json!({"directories": [format!("{a_path}/"), "  ", b_path, a_path]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(state.tasks.snapshot().await.tasks[0].directories, vec![a_path.clone(), b_path.clone()]);
+
+        // The first attached dir wins over the frontend's fallback cwd.
+        let opened: serde_json::Value = client
+            .post(format!("{base}/terminals/tasks/{}", task.id))
+            .json(&serde_json::json!({"cwd": "/tmp"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let info: serde_json::Value = client
+            .get(format!("{base}/terminals/{}", opened["pty_id"].as_str().unwrap()))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(info["cwd"], a_path);
+        state.terminal.kill_all();
+    }
+
+    #[test]
+    fn task_launch_dirs_skips_vanished_dirs_and_falls_back() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let a_path = a.path().to_string_lossy().to_string();
+        let b_path = b.path().to_string_lossy().to_string();
+        let (cwd, add) = task_launch_dirs(&["/gone".into(), a_path.clone(), b_path.clone()], None);
+        assert_eq!((cwd, add), (a_path.clone(), vec![b_path]));
+        let (cwd, add) = task_launch_dirs(&["/gone".into()], Some(a_path.clone()));
+        assert_eq!((cwd, add), (a_path, vec![]));
     }
 
     #[tokio::test]
@@ -1134,6 +1449,67 @@ mod tests {
             state.dismissed_sessions.lock().await.contains("s1"),
             "deleting must durably mark the session dismissed so it doesn't reappear on restart"
         );
+    }
+
+    fn unembedded_memory(session_id: &str, text: &str, title: &str) -> Memory {
+        Memory {
+            id: format!("{session_id}-prompt"),
+            session_id: session_id.into(),
+            kind: MemoryKind::Prompt,
+            text: text.into(),
+            embedding: vec![0.0; crate::memory_repo::EMBEDDING_DIM as usize],
+            project: "api-gateway".into(),
+            cwd: "/x".into(),
+            tool: "Claude Code".into(),
+            title: title.into(),
+            created_at: 0,
+        }
+    }
+
+    async fn search_for(base: &str, q: &str) -> Vec<SearchResult> {
+        reqwest::Client::new().get(format!("{base}/search?q={q}")).send().await.unwrap().json().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_backend_searches_by_keyword() {
+        let config = SummarizeConfig { backend: InferenceBackend::Native, ..SummarizeConfig::default() };
+        let (base, state) = spawn_test_server_with(Arc::new(crate::ollama::fake::FailingOllamaClient), config).await;
+        state.repo.upsert_memory(&unembedded_memory("s1", "tune the LR schedule", "LR schedule tuning")).await.unwrap();
+        state.repo.upsert_memory(&unembedded_memory("s2", "refactor auth middleware to async", "Auth refactor")).await.unwrap();
+        state.repo.upsert_memory(&unembedded_memory("s3", "fix the auth login bug", "Login fix")).await.unwrap();
+
+        let results = search_for(&base, "auth middleware").await;
+        assert_eq!(results.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(), vec!["s2", "s3"]);
+        assert!(results[0].distance < results[1].distance);
+        assert!((0.0..=1.0).contains(&results[1].distance));
+
+        let inference: serde_json::Value = reqwest::get(format!("{base}/inference")).await.unwrap().json().await.unwrap();
+        assert_eq!(inference["backend"], "native");
+    }
+
+    /// Ollama configured but not answering: search used to return `[]`.
+    #[tokio::test]
+    async fn ollama_backend_falls_back_to_keyword_search_when_embed_fails() {
+        let (base, state) = spawn_test_server_with(Arc::new(crate::ollama::fake::FailingOllamaClient), SummarizeConfig::default()).await;
+        state.repo.upsert_memory(&unembedded_memory("s1", "tune the LR schedule", "LR schedule tuning")).await.unwrap();
+        let results = search_for(&base, "schedule").await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, "s1");
+    }
+
+    /// Rows written while running without Ollama have zero vectors; once
+    /// Ollama is available they must still be findable, via keywords.
+    #[tokio::test]
+    async fn ollama_backend_still_finds_rows_written_without_ollama() {
+        let (base, state) = spawn_test_server().await;
+        let embedding = state.ollama.embed("nomic-embed-text", "refactor auth middleware").await.unwrap();
+        let mut embedded = unembedded_memory("s1", "refactor auth middleware", "Auth refactor");
+        embedded.embedding = embedding;
+        state.repo.upsert_memory(&embedded).await.unwrap();
+        state.repo.upsert_memory(&unembedded_memory("s2", "auth middleware tests", "Auth tests")).await.unwrap();
+
+        let results = search_for(&base, "auth middleware").await;
+        assert_eq!(results.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(), vec!["s1", "s2"]);
     }
 
     #[tokio::test]
@@ -1445,18 +1821,33 @@ mod tests {
         assert_eq!(links[0].container, "PROJ");
 
         let listed: serde_json::Value = client.get(format!("{base}/tickets?board=default")).send().await.unwrap().json().await.unwrap();
-        assert_eq!(listed["tickets"][0]["key"], "PROJ-1");
-        assert!(listed["tickets"][0]["imported_task_id"].is_null());
+        assert_eq!(listed["tickets"][1]["key"], "PROJ-1", "newest first");
+        assert!(listed["tickets"][1]["imported_task_id"].is_null());
 
         let import = serde_json::json!({"provider": "fake", "key": "PROJ-1", "board": "default", "stage": "backlog"});
         let task: Task = client.post(format!("{base}/tickets/import")).json(&import).send().await.unwrap().json().await.unwrap();
-        assert_eq!((task.title.as_str(), task.stage), ("Fix login", Stage::Backlog));
+        assert_eq!((task.title.as_str(), task.stage.as_str()), ("Fix login", "backlog"));
         let again: Task = client.post(format!("{base}/tickets/import")).json(&import).send().await.unwrap().json().await.unwrap();
         assert_eq!(again.id, task.id, "importing twice returns the same task");
         assert_eq!(state.tasks.snapshot().await.tasks.len(), 1);
 
         let listed: serde_json::Value = client.get(format!("{base}/tickets?board=default")).send().await.unwrap().json().await.unwrap();
-        assert_eq!(listed["tickets"][0]["imported_task_id"], task.id.as_str());
+        assert_eq!(listed["tickets"][1]["imported_task_id"], task.id.as_str());
+
+        // A column that isn't on the board is refused; no stage means the intake column.
+        let bad_col = serde_json::json!({"provider": "fake", "key": "PROJ-2", "board": "default", "stage": "nope"});
+        assert_eq!(client.post(format!("{base}/tickets/import")).json(&bad_col).send().await.unwrap().status(), 400);
+
+        let intake: Task = client
+            .post(format!("{base}/tickets/import"))
+            .json(&serde_json::json!({"provider": "fake", "key": "PROJ-2"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(intake.stage, "todo");
 
         let missing = serde_json::json!({"provider": "fake", "key": "PROJ-404"});
         assert_eq!(client.post(format!("{base}/tickets/import")).json(&missing).send().await.unwrap().status(), 502);

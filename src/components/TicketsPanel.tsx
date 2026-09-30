@@ -21,7 +21,7 @@ const errText = (err: unknown) => (err instanceof Error ? err.message : String(e
 // Ticket trackers → tasks. Provider-neutral on purpose: every provider-specific
 // string (name, auth fields, what a "container" is called) comes from
 // `GET /trackers`, so a new tracker needs no change here. Import is always an
-// explicit action — "Add" (→ To Do) or dragging a row onto a column.
+// explicit action — "Add" (→ the board's intake column) or dragging a row onto a column.
 export function TicketsPanel() {
   const open = useSessionStore((s) => s.ticketsOpen);
   const setOpen = useSessionStore((s) => s.setTicketsOpen);
@@ -29,6 +29,12 @@ export function TicketsPanel() {
   const trackers = useSessionStore(useShallow((s) => s.trackers));
   const setTrackers = useSessionStore((s) => s.setTrackers);
   const draggingTicket = useSessionStore((s) => s.drag.kind === "ticket");
+  // "Add" files into the board's intake column (the same one quick-add uses).
+  const intakeName = useSessionStore((s) => {
+    const layout = s.columns[s.activeBoardId] ?? s.defaultColumns;
+    const id = layout.intake ?? layout.columns[0]?.id;
+    return layout.columns.find((c) => c.id === id)?.name ?? "the first column";
+  });
   // Re-list when tasks change so "on board" markers follow imports/deletes.
   const taskCount = useSessionStore((s) => s.tasks.length);
 
@@ -140,7 +146,7 @@ export function TicketsPanel() {
                   {e.container}: {e.error}
                 </div>
               ))}
-              <div className={styles.hint}>Drag a ticket onto a column, or add it to To Do.</div>
+              <div className={styles.hint}>Drag a ticket onto a column, or add it to {intakeName}.</div>
               <div className={styles.list}>
                 {visible.map((t) => (
                   <TicketRow key={`${t.provider}:${t.key}`} ticket={t} showContainer={links.length > 1} />
@@ -358,7 +364,7 @@ function TicketRow({ ticket, showContainer }: { ticket: Ticket; showContainer: b
       {imported ? (
         <span className={styles.onBoard}>on board</span>
       ) : (
-        <button className={styles.small} onClick={() => dropTicket(ref, "todo")} data-testid="import-ticket">
+        <button className={styles.small} onClick={() => dropTicket(ref)} data-testid="import-ticket">
           Add
         </button>
       )}

@@ -1,10 +1,10 @@
-import { assignSession, importTicket, updateTask } from "../api";
+import { assignSession, importTicket, reorderColumns, updateTask } from "../api";
 import { ORPHAN } from "../store/selectors";
 import { NO_DRAG, useSessionStore, type DragState } from "../store/sessionStore";
 import type { Stage } from "../types";
 
 // Every mutation goes to the Core Engine, which owns tasks/assignments;
-// the resulting state (incl. the Done rollup) comes back over the WS as a
+// the resulting state comes back over the WS as a
 // `TasksChanged` snapshot, so nothing here mutates the store locally.
 
 /** Session → task, or `null` to unassign (back to the tray). */
@@ -20,8 +20,19 @@ export function moveTask(taskId: string, stage: Stage): void {
   void updateTask(taskId, { stage });
 }
 
-/** Ticket → task in `stage` (the backend dedups a ticket already on the board). */
-export function dropTicket(ticket: { provider: string; key: string }, stage: Stage): void {
+/** Moves a column of the active board to position `toIndex`. */
+export function moveColumn(colId: string, toIndex: number): void {
+  const { activeBoardId, columns, defaultColumns } = useSessionStore.getState();
+  const ids = (columns[activeBoardId] ?? defaultColumns).columns.map((c) => c.id);
+  const from = ids.indexOf(colId);
+  if (from < 0 || toIndex < 0 || toIndex >= ids.length || from === toIndex) return;
+  ids.splice(toIndex, 0, ...ids.splice(from, 1));
+  reorderColumns(activeBoardId, ids).catch((err) => console.error("Failed to reorder columns:", err));
+}
+
+/** Ticket → task in column `stage`, or the board's intake column when omitted
+ * (the backend dedups a ticket already on the board). */
+export function dropTicket(ticket: { provider: string; key: string }, stage?: string): void {
   const { activeBoardId } = useSessionStore.getState();
   importTicket(ticket.provider, ticket.key, activeBoardId, stage).catch((err) => console.error("Failed to import ticket:", err));
 }

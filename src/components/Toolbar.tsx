@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { getInferenceBackend, type InferenceBackend } from "../api";
 import { useBoardSessions, useBoardTasks, useSessionStore } from "../store/sessionStore";
 import { useShallow } from "zustand/react/shallow";
 import { SearchField } from "./SearchField";
@@ -23,6 +25,10 @@ export function Toolbar() {
   const assignments = useSessionStore(useShallow((s) => s.assignments));
   const tasks = useBoardTasks();
   const known = new Set(tasks.map((t) => t.id));
+  const [backend, setBackend] = useState<InferenceBackend | null>(null);
+  useEffect(() => {
+    getInferenceBackend().then(setBackend, () => {});
+  }, []);
   const idleCount = sessions.filter((s) => s.state === "Idle" && !(assignments[s.id] && known.has(assignments[s.id]))).length;
 
   return (
@@ -49,7 +55,9 @@ export function Toolbar() {
         Tickets
       </button>
       <StatusPill workingCount={workingCount} waitingCount={waitingCount} />
-      <span className={styles.caption}>100% local · Ollama + LanceDB</span>
+      <span className={styles.caption}>
+        100% local{backend && ` · ${backend === "native" ? "Claude-native" : "Ollama"} + LanceDB`}
+      </span>
     </div>
   );
 }

@@ -527,7 +527,7 @@ pub mod fake {
 mod tests {
     use super::fake::FakeProvider;
     use super::*;
-    use crate::tasks::Stage;
+    use crate::tasks::stage;
 
     fn trackers(p: Arc<FakeProvider>) -> Trackers {
         Trackers::new(TrackerRegistry::new(vec![p]), Arc::new(MemoryCredentials::default()), TrackerLinks::in_memory())
@@ -553,7 +553,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let hub = TaskHub::load(&dir.path().join("tasks.json"));
-        let task = hub.create_from_ticket(TicketRef::from(&older), "default", Stage::Todo).await;
+        let task = hub.create_from_ticket(TicketRef::from(&older), "default", Some(stage::TODO)).await.unwrap();
 
         let resp = tr.open_tickets("default", &hub.snapshot().await).await;
         let keys: Vec<&str> = resp.tickets.iter().map(|t| t.ticket.key.as_str()).collect();
@@ -575,7 +575,7 @@ mod tests {
         let tr = trackers(p.clone());
         let dir = tempfile::tempdir().unwrap();
         let hub = TaskHub::load(&dir.path().join("tasks.json"));
-        hub.create_from_ticket(TicketRef::from(&t), "default", Stage::Todo).await;
+        hub.create_from_ticket(TicketRef::from(&t), "default", Some(stage::TODO)).await.unwrap();
         let mut rx = hub.subscribe();
 
         tr.refresh_linked_states(&hub).await;
@@ -585,7 +585,7 @@ mod tests {
         tr.refresh_linked_states(&hub).await;
         let snap = rx.try_recv().expect("state change must broadcast");
         assert_eq!(snap.tasks[0].ticket.as_ref().unwrap().state, TicketState::Closed);
-        assert_eq!(snap.tasks[0].stage, Stage::Todo, "ticket state never moves the stage");
+        assert_eq!(snap.tasks[0].stage, stage::TODO, "ticket state never moves the stage");
     }
 
     #[test]

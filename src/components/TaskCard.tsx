@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { deleteTask } from "../api";
 import { openExternal } from "../openExternal";
 import { useSessionStore } from "../store/sessionStore";
@@ -6,11 +7,14 @@ import { fmtCost, fmtTokens, toolColorVar } from "../styles/sessionStyle";
 import type { SessionView, Task, TicketRef } from "../types";
 import { beginDrag, endDrag, getDrag, moveSession } from "./boardActions";
 import { SessionRow } from "./SessionRow";
+import { TaskDirectories } from "./TaskDirectories";
 import styles from "./Kanban.module.css";
 
 interface Props {
   task: Task;
   sessions: SessionView[];
+  /** The card sits in its board's done-role column (dimmed, green bar). */
+  done: boolean;
 }
 
 /** The ticket a task was imported from. Provider-neutral: the name comes from `GET /trackers`. */
@@ -34,7 +38,7 @@ function TicketChip({ ticket }: { ticket: TicketRef }) {
   );
 }
 
-export function TaskCard({ task, sessions }: Props) {
+export function TaskCard({ task, sessions, done }: Props) {
   const collapsed = useSessionStore((s) => s.collapsedTasks.has(task.id));
   const toggle = useSessionStore((s) => s.toggleTaskCollapsed);
   const drag = useSessionStore((s) => s.drag);
@@ -45,9 +49,11 @@ export function TaskCard({ task, sessions }: Props) {
   const { project, tool } = taskMeta(sessions);
   const isDragging = drag.kind === "task" && drag.taskId === task.id;
   const sessionOver = drag.kind === "session" && overTaskId === task.id && drag.srcTaskId !== task.id;
+  const [editingDirs, setEditingDirs] = useState(false);
 
-  // New session for this task, in the board's terminal pane: reuses the cwd
-  // of its most recently started session (the backend falls back to the
+  // New session for this task, in the board's terminal pane. The backend runs
+  // it in the task's attached directories when it has any; otherwise it
+  // reuses the cwd of its most recently started session (falling back to the
   // user's home dir if none exist yet — `sessions` is oldest-first, see
   // `sessionsOfTask`). The new `claude` process gets tagged with
   // `SESSIONBOARD_TASK_ID` so the engine files it under this task the moment
@@ -64,7 +70,7 @@ export function TaskCard({ task, sessions }: Props) {
   const cls = [
     styles.taskCard,
     roll.needsYou ? styles.taskNeeds : roll.anyWorking ? styles.taskWorking : "",
-    task.stage === "done" ? styles.taskDone : "",
+    done ? styles.taskDone : "",
     sessionOver ? styles.taskDropTarget : "",
   ].join(" ");
 
@@ -111,6 +117,18 @@ export function TaskCard({ task, sessions }: Props) {
         <span className={styles.spacer} />
         {roll.needsYou && <span className={styles.needsPill}>● Needs you</span>}
         <button
+          className={`${styles.iconButton} ${styles.taskDirsButton} ${editingDirs ? styles.taskDirsButtonOn : ""}`}
+          title="Directories new sessions for this task start in"
+          aria-label="Edit task directories"
+          data-testid="edit-task-directories"
+          onClick={(e) => {
+            e.stopPropagation();
+            setEditingDirs((v) => !v);
+          }}
+        >
+          ⌂
+        </button>
+        <button
           className={`${styles.iconButton} ${styles.taskStart}`}
           title="Start a new Claude Code session for this task"
           aria-label="Start new session"
@@ -134,6 +152,9 @@ export function TaskCard({ task, sessions }: Props) {
       </div>
       <div className={styles.taskTitle}>{task.title}</div>
       {task.ticket && <TicketChip ticket={task.ticket} />}
+      {(editingDirs || task.directories.length > 0) && (
+        <TaskDirectories task={task} editing={editingDirs} onDone={() => setEditingDirs(false)} />
+      )}
 
       {roll.total > 0 ? (
         <>
@@ -141,7 +162,7 @@ export function TaskCard({ task, sessions }: Props) {
             <div className={styles.rollTrack}>
               <div
                 className={styles.rollFill}
-                style={{ width: `${roll.pct}%`, background: task.stage === "done" ? "var(--tk-done)" : "var(--tk-lime)" }}
+                style={{ width: `${roll.pct}%`, background: done ? "var(--tk-done)" : "var(--tk-lime)" }}
               />
             </div>
             <span className={styles.rollLabel}>

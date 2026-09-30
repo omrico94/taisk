@@ -1,16 +1,16 @@
 ---
 name: install-sessionboard
-description: Installs and verifies everything SessionBoard needs to build and run locally — Rust, Node.js, Ollama, the two required Ollama models (nomic-embed-text, qwen2.5:1.5b), and npm dependencies — then confirms the Rust workspace compiles. Use this whenever the user wants to set up, install, bootstrap, or get SessionBoard running for the first time (or on a new machine), asks "what do I need to install for this project", hits a missing-dependency error (cargo/npm/ollama not found, model not pulled), or wants to verify their SessionBoard dev environment is complete. Safe to re-run any time — every step checks what's already installed before doing anything.
+description: Installs and verifies everything SessionBoard needs to build and run locally — Rust, Node.js, npm dependencies, and optionally Ollama with its two models (nomic-embed-text, qwen2.5:1.5b — without them the app runs in Claude-native mode) — then confirms the Rust workspace compiles. Use this whenever the user wants to set up, install, bootstrap, or get SessionBoard running for the first time (or on a new machine), asks "what do I need to install for this project", hits a missing-dependency error (cargo/npm/ollama not found, model not pulled), or wants to verify their SessionBoard dev environment is complete. Safe to re-run any time — every step checks what's already installed before doing anything.
 ---
 
 # Install SessionBoard
 
-SessionBoard needs three pieces of local tooling before it can build or run:
-Rust (the core engine + Tauri shell), Node.js (the frontend build), and Ollama
-with two specific models (the local LLM inference the app depends on for
-categorization and semantic search). Forgetting one of these is the most
-common reason a fresh checkout fails to build or the app starts but sessions
-never get categorized.
+SessionBoard needs Rust (the core engine + Tauri shell) and Node.js (the
+frontend build) to build or run. Ollama with two specific models is
+**optional**: it powers LLM-written titles/summaries and semantic search, and
+without it the app runs in Claude-native mode (Claude Code's own session
+titles from the transcript, keyword search). If the user doesn't want Ollama,
+skip it — the app is not broken without it.
 
 ## What to do
 

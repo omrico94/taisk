@@ -6,15 +6,16 @@
 //! real browser against a fully real, non-mocked backend. Not part of the
 //! shipped app.
 //!
-//! Uses a real `HttpOllamaClient` if reachable, otherwise falls back to
-//! `FakeOllamaClient` so this still runs on a machine without Ollama
-//! installed (e.g. this dev machine, per plan §11).
+//! Auto-detects the inference backend like the real app (Ollama if ready,
+//! Claude-native otherwise); `SESSIONBOARD_FAKE_OLLAMA=1` forces a
+//! deterministic `FakeOllamaClient` for stable E2E titles.
 
 use std::sync::Arc;
 
 use core_engine::api::router;
 use core_engine::bootstrap::{self, BootstrapOptions};
 use core_engine::ollama::{HttpOllamaClient, OllamaClient};
+use core_engine::summarize::InferenceBackend;
 use core_engine::API_PORT;
 
 #[tokio::main]
@@ -23,12 +24,13 @@ async fn main() {
     // SESSIONBOARD_FAKE_OLLAMA=1 forces the deterministic fake even when a
     // real Ollama is running (E2E runs want stable titles: first 4 prompt words).
     let force_fake = std::env::var("SESSIONBOARD_FAKE_OLLAMA").is_ok();
-    let ollama: Arc<dyn OllamaClient> = if !force_fake && http_ollama.is_reachable().await {
-        println!("dev_server: using real Ollama at 127.0.0.1:11434");
-        Arc::new(http_ollama)
+    // Without the fake, the backend is auto-detected like the real app
+    // (Claude-native when Ollama isn't running; TAISK_INFERENCE overrides).
+    let (ollama, backend): (Arc<dyn OllamaClient>, Option<InferenceBackend>) = if force_fake {
+        println!("dev_server: using FakeOllamaClient (SESSIONBOARD_FAKE_OLLAMA)");
+        (Arc::new(core_engine::ollama::fake::FakeOllamaClient::new("")), Some(InferenceBackend::Ollama))
     } else {
-        println!("dev_server: Ollama not reachable, using FakeOllamaClient (see plan §11)");
-        Arc::new(core_engine::ollama::fake::FakeOllamaClient::new(""))
+        (Arc::new(http_ollama), None)
     };
 
     // Deliberately None: this is a throwaway test harness, not an install —
@@ -37,7 +39,7 @@ async fn main() {
     // which resolves incorrectly for an example binary and wrote a broken
     // entry into the real file — drive hook events directly at the UDS in
     // tests/manual verification instead, as the orchestrator test does.)
-    let api_state = bootstrap::start(ollama, BootstrapOptions { hook_bridge_path: None, terminal: core_engine::terminal::TerminalManager::new() })
+    let api_state = bootstrap::start(ollama, BootstrapOptions { hook_bridge_path: None, terminal: core_engine::terminal::TerminalManager::new(), backend })
         .await
         .expect("Core Engine bootstrap failed");
 

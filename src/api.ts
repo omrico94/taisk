@@ -1,5 +1,7 @@
 import type {
   Board,
+  Column,
+  ColumnRole,
   ConnectionStatus,
   SearchResult,
   SessionView,
@@ -60,12 +62,13 @@ export async function getTasks(): Promise<TasksSnapshot> {
   return resp.json();
 }
 
-/** Throws on a rejected (e.g. blank-title) request so callers can surface it. */
-export async function createTask(title: string, stage: Stage, board: string): Promise<Task> {
+/** Throws on a rejected (e.g. blank-title) request so callers can surface it.
+ * `stage: null` files the task in the board's intake column. */
+export async function createTask(title: string, stage: Stage | null, board: string): Promise<Task> {
   const resp = await fetch(`${API_BASE}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, stage, board }),
+    body: JSON.stringify(stage === null ? { title, board } : { title, stage, board }),
   });
   if (!resp.ok) throw new Error(`Failed to create task "${title}" (${resp.status})`);
   return resp.json();
@@ -77,6 +80,20 @@ export async function updateTask(id: string, patch: { title?: string; stage?: St
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
+}
+
+/** Replaces the task's attached directories. Throws with the backend's message
+ *  (e.g. "… is not an existing directory") so the editor can show it. */
+export async function setTaskDirectories(id: string, directories: string[]): Promise<void> {
+  const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ directories }),
+  });
+  if (!resp.ok) {
+    const body = (await resp.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `Failed to update directories (${resp.status})`);
+  }
 }
 
 /** Its sessions become unassigned (they return to the tray). */
@@ -91,6 +108,15 @@ export async function assignSession(sessionId: string, taskId: string | null): P
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ task_id: taskId }),
   });
+}
+
+/** Where titles/summaries/search come from: local Ollama, or Claude Code's own transcript data. */
+export type InferenceBackend = "ollama" | "native";
+
+export async function getInferenceBackend(): Promise<InferenceBackend> {
+  const resp = await fetch(`${API_BASE}/inference`);
+  const body: { backend: InferenceBackend } = await resp.json();
+  return body.backend;
 }
 
 export async function search(query: string, board: string): Promise<SearchResult[]> {
@@ -136,14 +162,42 @@ export async function deleteBoard(id: string): Promise<void> {
   await boardRequest(`${API_BASE}/boards/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-// ---- Ticket trackers (provider-neutral: GitHub today, others later) ----
-
-const q = (board: string) => `board=${encodeURIComponent(board)}`;
+// Column edits: the resulting layout comes back over the WS as part of the
+// next `TasksChanged` snapshot, like every other task mutation.
+const columnsUrl = (board: string) => `${API_BASE}/boards/${encodeURIComponent(board)}/columns`;
 const jsonInit = (method: string, body: unknown): RequestInit => ({
   method,
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
+
+export async function addColumn(board: string, name: string): Promise<Column> {
+  const resp = await boardRequest(columnsUrl(board), jsonInit("POST", { name }));
+  return resp.json();
+}
+
+export async function updateColumn(board: string, id: string, patch: { name?: string; color?: string }): Promise<void> {
+  await boardRequest(`${columnsUrl(board)}/${encodeURIComponent(id)}`, jsonInit("PATCH", patch));
+}
+
+export async function reorderColumns(board: string, ids: string[]): Promise<void> {
+  await boardRequest(`${columnsUrl(board)}/order`, jsonInit("PUT", { ids }));
+}
+
+/** `null` unsets a role; roles left out are unchanged. */
+export async function setColumnRoles(board: string, roles: Partial<Record<ColumnRole, string | null>>): Promise<void> {
+  await boardRequest(`${columnsUrl(board)}/roles`, jsonInit("PUT", roles));
+}
+
+/** Tasks in the deleted column move to `moveTasksTo`. */
+export async function deleteColumn(board: string, id: string, moveTasksTo: string): Promise<void> {
+  const q = `move_tasks_to=${encodeURIComponent(moveTasksTo)}`;
+  await boardRequest(`${columnsUrl(board)}/${encodeURIComponent(id)}?${q}`, { method: "DELETE" });
+}
+
+// ---- Ticket trackers (provider-neutral: GitHub today, others later) ----
+
+const boardQuery = (board: string) => `board=${encodeURIComponent(board)}`;
 
 export async function getTrackers(): Promise<TrackerInfo[]> {
   const resp = await boardRequest(`${API_BASE}/trackers`, {});
@@ -163,28 +217,29 @@ export async function disconnectTracker(provider: string): Promise<ConnectionSta
 }
 
 export async function getTrackerLinks(board: string): Promise<TrackerLink[]> {
-  const resp = await boardRequest(`${API_BASE}/trackers/links?${q(board)}`, {});
+  const resp = await boardRequest(`${API_BASE}/trackers/links?${boardQuery(board)}`, {});
   return resp.json();
 }
 
 /** Replaces the board's links; containers come back canonicalized (a pasted URL → owner/repo). */
 export async function setTrackerLinks(board: string, links: TrackerLink[]): Promise<TrackerLink[]> {
-  const resp = await boardRequest(`${API_BASE}/trackers/links?${q(board)}`, jsonInit("PUT", { links }));
+  const resp = await boardRequest(`${API_BASE}/trackers/links?${boardQuery(board)}`, jsonInit("PUT", { links }));
   return resp.json();
 }
 
 export async function getTrackerSuggestions(provider: string, board: string): Promise<string[]> {
-  const resp = await boardRequest(`${API_BASE}/trackers/${encodeURIComponent(provider)}/suggestions?${q(board)}`, {});
+  const resp = await boardRequest(`${API_BASE}/trackers/${encodeURIComponent(provider)}/suggestions?${boardQuery(board)}`, {});
   return resp.json();
 }
 
 export async function getTickets(board: string): Promise<TicketsResponse> {
-  const resp = await boardRequest(`${API_BASE}/tickets?${q(board)}`, {});
+  const resp = await boardRequest(`${API_BASE}/tickets?${boardQuery(board)}`, {});
   return resp.json();
 }
 
-/** Ticket → task (idempotent: a ticket already on the board returns its task). */
-export async function importTicket(provider: string, key: string, board: string, stage: Stage): Promise<Task> {
+/** Ticket → task (idempotent: a ticket already on the board returns its task).
+ * `stage` is a column id; omitted files it in the board's intake column. */
+export async function importTicket(provider: string, key: string, board: string, stage?: Stage): Promise<Task> {
   const resp = await boardRequest(`${API_BASE}/tickets/import`, jsonInit("POST", { provider, key, board, stage }));
   return resp.json();
 }

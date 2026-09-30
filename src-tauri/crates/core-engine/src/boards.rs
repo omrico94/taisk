@@ -48,7 +48,7 @@ pub fn expand_home(raw: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
-fn slugify(name: &str) -> String {
+pub(crate) fn slugify(name: &str) -> String {
     let mut out = String::new();
     for c in name.trim().to_lowercase().chars() {
         if c.is_ascii_alphanumeric() {
