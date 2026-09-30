@@ -251,6 +251,20 @@ pub mod fake {
         }
     }
 
+    /// Behaves like an unreachable Ollama: every call errors.
+    pub struct FailingOllamaClient;
+
+    #[async_trait]
+    impl OllamaClient for FailingOllamaClient {
+        async fn embed(&self, _model: &str, _text: &str) -> Result<Vec<f32>, OllamaError> {
+            Err(OllamaError::Http("connection refused".into()))
+        }
+
+        async fn generate(&self, _model: &str, _prompt: &str) -> Result<String, OllamaError> {
+            Err(OllamaError::Http("connection refused".into()))
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;

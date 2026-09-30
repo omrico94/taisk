@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::api::AppState;
 use crate::boards::BoardStore;
-use crate::summarize::SummarizeConfig;
+use crate::summarize::{InferenceBackend, SummarizeConfig};
 use crate::engine::EngineHandle;
 use crate::memory_repo::MemoryRepo;
 use crate::ollama::OllamaClient;
@@ -27,11 +27,15 @@ pub struct BootstrapOptions {
     pub hook_bridge_path: Option<String>,
     /// Shared with the host so it can kill every embedded terminal on quit.
     pub terminal: TerminalManager,
+    /// Forces a backend instead of `InferenceBackend::detect()` — the dev
+    /// server's fake-Ollama mode needs `Ollama` even with no Ollama running.
+    pub backend: Option<InferenceBackend>,
 }
 
 /// Never blocks on first-run readiness (Ollama reachable, models present) —
 /// that's a concern for the UI to surface, not a precondition for starting
-/// the engine itself (plan §9).
+/// the engine itself (plan §9). Ollama is optional: without it the engine
+/// runs on Claude-native data (see `summarize::InferenceBackend`).
 pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> Result<AppState, Box<dyn std::error::Error>> {
     crate::first_run::migrate_legacy_data_dir();
     let app_data_dir = crate::first_run::app_data_dir();
@@ -47,7 +51,12 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
 
     let repo = Arc::new(MemoryRepo::open(crate::first_run::lancedb_dir().to_str().unwrap()).await?);
     let engine = EngineHandle::spawn();
-    let cat_config = Arc::new(SummarizeConfig::default());
+    let backend = match options.backend {
+        Some(backend) => backend,
+        None => InferenceBackend::detect().await,
+    };
+    eprintln!("taisk: inference backend = {} (set TAISK_INFERENCE=ollama|native to override)", backend.as_str());
+    let cat_config = Arc::new(SummarizeConfig { backend, ..SummarizeConfig::default() });
     let orch_config = Arc::new(OrchestratorConfig { boards: boards.clone(), ..OrchestratorConfig::default() });
     // Shared with the orchestrator: approve/reject/reply from the board must
     // evict the same durable "waiting" record a real hook resolution would

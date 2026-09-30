@@ -82,6 +82,15 @@ export async function assignSession(sessionId: string, taskId: string | null): P
   });
 }
 
+/** Where titles/summaries/search come from: local Ollama, or Claude Code's own transcript data. */
+export type InferenceBackend = "ollama" | "native";
+
+export async function getInferenceBackend(): Promise<InferenceBackend> {
+  const resp = await fetch(`${API_BASE}/inference`);
+  const body: { backend: InferenceBackend } = await resp.json();
+  return body.backend;
+}
+
 export async function search(query: string, board: string): Promise<SearchResult[]> {
   const resp = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}&board=${encodeURIComponent(board)}`);
   return resp.json();
