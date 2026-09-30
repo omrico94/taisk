@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { deleteColumn, setColumnRoles, updateColumn } from "../api";
+import { addColumn, deleteColumn, reorderColumns, setColumnRoles, updateColumn } from "../api";
 import { useSessionStore } from "../store/sessionStore";
 import { COLUMN_PALETTE } from "../store/selectors";
 import type { BoardColumns, Column, ColumnRole } from "../types";
@@ -34,6 +34,8 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
   const index = layout.columns.findIndex((c) => c.id === column.id);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [moveTo, setMoveTo] = useState(others[Math.max(0, index - 1)]?.id ?? "");
+  const [addSide, setAddSide] = useState<"left" | "right" | null>(null);
+  const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -58,6 +60,25 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
     onClose();
   };
 
+  // New column is created (appended at the end by the backend), then moved
+  // next to this one — same two-step dance as a drag-reorder.
+  const commitAdd = () => {
+    const n = newName.trim();
+    if (!n) return setAddSide(null);
+    addColumn(board, n)
+      .then((created) => {
+        const ids = layout.columns.map((c) => c.id);
+        ids.splice(addSide === "left" ? index : index + 1, 0, created.id);
+        return reorderColumns(board, ids);
+      })
+      .then(() => {
+        setAddSide(null);
+        setNewName("");
+        onClose();
+      })
+      .catch((err: Error) => setError(err.message));
+  };
+
   const left = Math.max(8, Math.min(anchor.x - MENU_W, window.innerWidth - MENU_W - 8));
 
   return createPortal(
@@ -68,7 +89,34 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
       style={{ left, top: anchor.y, width: MENU_W }}
       onClick={(e) => e.stopPropagation()}
     >
-      {confirmDelete ? (
+      {addSide ? (
+        <>
+          <div className={styles.assignHeader}>
+            Add a column to the {addSide} of “{column.name}”
+          </div>
+          <div className={styles.addRow}>
+            <input
+              autoFocus
+              className={styles.addInput}
+              value={newName}
+              maxLength={40}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitAdd();
+                else if (e.key === "Escape") setAddSide(null);
+              }}
+              placeholder="Column name…"
+              aria-label="New column name"
+            />
+            <button className={styles.addCommit} onClick={commitAdd}>
+              Add
+            </button>
+            <button className={styles.addCancel} onClick={() => setAddSide(null)}>
+              Esc
+            </button>
+          </div>
+        </>
+      ) : confirmDelete ? (
         <>
           <div className={styles.assignHeader}>Delete “{column.name}”?</div>
           {taskCount > 0 && (
@@ -131,6 +179,14 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
             </button>
             <button className={styles.menuItem} disabled={index >= layout.columns.length - 1} onClick={() => move(1)}>
               Move right →
+            </button>
+          </div>
+          <div className={styles.menuRow}>
+            <button className={styles.menuItem} data-testid="add-left" onClick={() => setAddSide("left")}>
+              + Add left
+            </button>
+            <button className={styles.menuItem} data-testid="add-right" onClick={() => setAddSide("right")}>
+              + Add right
             </button>
           </div>
 

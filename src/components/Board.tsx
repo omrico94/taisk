@@ -65,7 +65,7 @@ export function Board() {
             assignments={assignments}
           />
         ))}
-        {layout.columns.length > 0 && <AddColumn />}
+        {layout.columns.length === 0 && <AddColumn />}
       </div>
     </div>
   );
