@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { deleteTask } from "../api";
+import { deleteTask, updateTask } from "../api";
 import { openExternal } from "../openExternal";
 import { useSessionStore } from "../store/sessionStore";
 import { taskMeta, taskRollup } from "../store/selectors";
@@ -50,6 +50,15 @@ export function TaskCard({ task, sessions, done }: Props) {
   const isDragging = drag.kind === "task" && drag.taskId === task.id;
   const sessionOver = drag.kind === "session" && overTaskId === task.id && drag.srcTaskId !== task.id;
   const [editingDirs, setEditingDirs] = useState(false);
+  const [renamingTitle, setRenamingTitle] = useState(false);
+
+  // Mirrors Column.tsx's own `rename` (double-click to edit, blur/Enter to
+  // commit, Escape to cancel) for the same title-editing convention.
+  const rename = (next: string) => {
+    setRenamingTitle(false);
+    const t = next.trim();
+    if (t && t !== task.title) updateTask(task.id, { title: t }).catch((err) => console.error("Failed to rename task:", err));
+  };
 
   // New session for this task, in the board's terminal pane. The backend runs
   // it in the task's attached directories when it has any; otherwise it
@@ -150,7 +159,36 @@ export function TaskCard({ task, sessions, done }: Props) {
           ✕
         </button>
       </div>
-      <div className={styles.taskTitle}>{task.title}</div>
+      {renamingTitle ? (
+        <input
+          autoFocus
+          className={styles.taskTitleRename}
+          defaultValue={task.title}
+          aria-label="Task title"
+          data-testid="task-title-input"
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onFocus={(e) => e.currentTarget.select()}
+          onBlur={(e) => rename(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+            else if (e.key === "Escape") setRenamingTitle(false);
+          }}
+        />
+      ) : (
+        <div
+          className={styles.taskTitle}
+          title="Double-click to rename"
+          data-testid="task-title"
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            setRenamingTitle(true);
+          }}
+        >
+          {task.title}
+        </div>
+      )}
       {task.ticket && <TicketChip ticket={task.ticket} />}
       {(editingDirs || task.directories.length > 0) && (
         <TaskDirectories task={task} editing={editingDirs} onDone={() => setEditingDirs(false)} />
