@@ -7,6 +7,8 @@ import { AskMemoryOverlay } from "./components/AskMemoryOverlay";
 import { BoardTabs } from "./components/BoardTabs";
 import { BoardDialog } from "./components/BoardDialog";
 import { TerminalPanel } from "./components/TerminalPanel";
+import { TicketsPanel } from "./components/TicketsPanel";
+import { getTrackers } from "./api";
 import { useSessionStore } from "./store/sessionStore";
 import { useSessionEngine } from "./store/useSessionEngine";
 import styles from "./App.module.css";
@@ -17,6 +19,13 @@ function App() {
   const askOpen = useSessionStore((s) => s.askOpen);
   const setAskOpen = useSessionStore((s) => s.setAskOpen);
   const selectCard = useSessionStore((s) => s.selectCard);
+
+  // Tracker names/status label task cards' ticket chips; the Tickets panel refreshes them on open.
+  useEffect(() => {
+    getTrackers()
+      .then(useSessionStore.getState().setTrackers)
+      .catch((err) => console.error("Failed to load trackers:", err));
+  }, []);
 
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -33,6 +42,7 @@ function App() {
       } else if (key === "escape") {
         setAskOpen(false);
         useSessionStore.getState().setBoardDialogOpen(false);
+        useSessionStore.getState().setTicketsOpen(false);
         selectCard(null);
         useSessionStore.getState().openAssignMenu(null);
       }
@@ -51,6 +61,7 @@ function App() {
         <AssignMenu />
         <AskMemoryOverlay />
         <BoardDialog />
+        <TicketsPanel />
       </div>
       <TerminalPanel />
     </div>

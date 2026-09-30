@@ -3,7 +3,7 @@ import { addColumn, createTask, updateColumn } from "../api";
 import { useSessionStore } from "../store/sessionStore";
 import { sessionsOfTask } from "../store/selectors";
 import type { BoardColumns, Column as ColumnDef, SessionView, Task } from "../types";
-import { beginDrag, endDrag, getDrag, moveColumn, moveTask } from "./boardActions";
+import { beginDrag, dropTicket, endDrag, getDrag, moveColumn, moveTask } from "./boardActions";
 import { ColumnMenu } from "./ColumnMenu";
 import { TaskCard } from "./TaskCard";
 import styles from "./Kanban.module.css";
@@ -31,7 +31,7 @@ export function Column({ column, layout, tasks, sessions, assignments }: Props) 
   const board = () => useSessionStore.getState().activeBoardId;
   // The active-role column (In Progress by default) gets the stronger accent.
   const strong = layout.active === id;
-  const hot = drag.kind === "task" && overCol === id;
+  const hot = (drag.kind === "task" || drag.kind === "ticket") && overCol === id;
   const reorderTarget = drag.kind === "column" && overCol === id && drag.colId !== id;
 
   const cancel = () => {
@@ -137,7 +137,8 @@ export function Column({ column, layout, tasks, sessions, assignments }: Props) 
         className={`${styles.columnBody} ${hot ? styles.columnHot : ""}`}
         data-testid={`column-body-${id}`}
         onDragOver={(e) => {
-          if (getDrag().kind !== "task") return;
+          const kind = getDrag().kind;
+          if (kind !== "task" && kind !== "ticket") return;
           e.preventDefault();
           if (overCol !== id) setOver({ col: id });
         }}
@@ -146,6 +147,13 @@ export function Column({ column, layout, tasks, sessions, assignments }: Props) 
         }}
         onDrop={(e) => {
           const d = getDrag();
+          if (d.kind === "ticket" && d.ticket) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropTicket(d.ticket, id);
+            endDrag();
+            return;
+          }
           if (d.kind !== "task" || !d.taskId) return;
           e.preventDefault();
           e.stopPropagation();

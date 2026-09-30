@@ -29,6 +29,7 @@ use crate::ollama::OllamaClient;
 use crate::orchestrator::{DismissedSessions, WaitingSessions};
 use crate::tasks::{Column, ColumnPatch, RolesPatch, Stage, Task, TaskError, TaskHub, TasksSnapshot};
 use crate::terminal::{PtyInfo, PtyOutput, SpawnSpec, TerminalManager};
+use crate::trackers::{Link, TicketRef, TicketsResponse, TrackerOverview, Trackers};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -62,6 +63,8 @@ pub struct AppState {
     /// Program spawned for a new/resumed session. `claude` in production;
     /// tests substitute a harmless fixture.
     pub claude_bin: String,
+    /// Ticket trackers (GitHub, …): providers, credentials, board links.
+    pub trackers: Trackers,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -86,6 +89,12 @@ pub fn router(state: AppState) -> Router {
         .route("/terminals/tasks/{task_id}", post(open_task_terminal))
         .route("/terminals/{pty_id}", get(get_terminal_info))
         .route("/terminals/{pty_id}/ws", get(ws_terminal))
+        .route("/trackers", get(list_trackers))
+        .route("/trackers/links", get(get_tracker_links).put(put_tracker_links))
+        .route("/trackers/{provider}/connection", put(connect_tracker).delete(disconnect_tracker))
+        .route("/trackers/{provider}/suggestions", get(tracker_suggestions))
+        .route("/tickets", get(list_tickets))
+        .route("/tickets/import", post(import_ticket))
         .route("/search", get(search))
         .route("/inference", get(get_inference))
         .route("/memories", delete(purge_memories))
@@ -188,14 +197,9 @@ async fn open_task_terminal(
     Path(task_id): Path<String>,
     body: Option<Json<OpenTaskTerminalBody>>,
 ) -> Result<Json<OpenedTerminal>, StatusCode> {
-    let task = state
-        .tasks
-        .snapshot()
-        .await
-        .tasks
-        .into_iter()
-        .find(|t| t.id == task_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let snap = state.tasks.snapshot().await;
+    let task = snap.tasks.iter().find(|t| t.id == task_id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    let has_sessions = snap.assignments.values().any(|t| *t == task_id);
     let (cwd, add_dirs) = task_launch_dirs(&task.directories, body.and_then(|Json(b)| b.cwd));
     let mut env = board_env(&state, &task.board);
     env.push(("SESSIONBOARD_TASK_ID".to_string(), task_id.clone()));
@@ -206,6 +210,8 @@ async fn open_task_terminal(
         args.push("--add-dir".to_string());
         args.push(dir);
     }
+    // Positional prompt goes after the flags.
+    args.extend(ticket_prompt(&state, task.ticket.as_ref(), has_sessions));
     let pty_id = state
         .terminal
         .spawn(SpawnSpec {
@@ -221,6 +227,15 @@ async fn open_task_terminal(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     Ok(Json(OpenedTerminal { pty_id, reused: false }))
+}
+
+/// The first session started from a ticket-linked task opens with the
+/// ticket as its prompt (passed as `claude`'s positional argument). Later
+/// sessions start blank — the task already has context, and repeating the
+/// prompt would restart the work.
+fn ticket_prompt(state: &AppState, ticket: Option<&TicketRef>, has_sessions: bool) -> Option<String> {
+    let ticket = ticket.filter(|_| !has_sessions)?;
+    Some(state.trackers.registry.get(&ticket.provider)?.session_prompt(ticket))
 }
 
 /// Where a session started from a task runs: the task's first attached
@@ -457,6 +472,7 @@ async fn update_board(
 async fn delete_board(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let board = state.boards.remove(&id).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
     state.tasks.delete_board(&id).await;
+    state.trackers.links.remove_board(&id);
     for session in state.engine.snapshot().await.into_iter().filter(|s| s.board == id) {
         unmark_waiting(&state, &session.id).await;
         state.tasks.forget_session(&session.id).await;
@@ -466,6 +482,125 @@ async fn delete_board(State(state): State<AppState>, Path(id): Path<String>) -> 
         let _ = crate::first_run::unregister_board_hooks(bridge, &board);
     }
     Ok(StatusCode::OK)
+}
+
+async fn list_trackers(State(state): State<AppState>) -> Json<Vec<TrackerOverview>> {
+    Json(state.trackers.overview().await)
+}
+
+fn provider_of(state: &AppState, id: &str) -> Result<Arc<dyn crate::trackers::TicketProvider>, (StatusCode, Json<ApiError>)> {
+    state.trackers.registry.get(id).ok_or_else(|| api_error(StatusCode::NOT_FOUND, format!("unknown tracker `{id}`")))
+}
+
+#[derive(Deserialize)]
+struct ConnectBody {
+    #[serde(default)]
+    fields: std::collections::HashMap<String, String>,
+}
+
+/// Validates the credentials against the real service before storing them
+/// (keychain only), so a saved connection is always one that worked.
+async fn connect_tracker(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(body): Json<ConnectBody>,
+) -> Result<Json<crate::trackers::ConnectionStatus>, (StatusCode, Json<ApiError>)> {
+    let p = provider_of(&state, &provider)?;
+    p.connect(state.trackers.creds.as_ref(), &body.fields).await.map(Json).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))
+}
+
+/// Forgets taisk's stored credentials. Returns the status afterwards, which
+/// can still be connected when credentials come from elsewhere (e.g. `gh`).
+async fn disconnect_tracker(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<Json<crate::trackers::ConnectionStatus>, (StatusCode, Json<ApiError>)> {
+    let p = provider_of(&state, &provider)?;
+    p.disconnect(state.trackers.creds.as_ref()).await.map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(p.status(state.trackers.creds.as_ref()).await))
+}
+
+#[derive(Deserialize)]
+struct BoardQuery {
+    board: Option<String>,
+}
+
+impl BoardQuery {
+    fn board(&self) -> &str {
+        self.board.as_deref().unwrap_or(DEFAULT_BOARD_ID)
+    }
+}
+
+async fn get_tracker_links(State(state): State<AppState>, Query(q): Query<BoardQuery>) -> Json<Vec<Link>> {
+    Json(state.trackers.links.get(q.board()))
+}
+
+#[derive(Deserialize)]
+struct LinksBody {
+    links: Vec<Link>,
+}
+
+/// Replaces the board's links. Each container is canonicalized by its
+/// provider (a pasted URL becomes `owner/repo`); one bad entry rejects all.
+async fn put_tracker_links(
+    State(state): State<AppState>,
+    Query(q): Query<BoardQuery>,
+    Json(body): Json<LinksBody>,
+) -> Result<Json<Vec<Link>>, (StatusCode, Json<ApiError>)> {
+    if state.boards.get(q.board()).is_none() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "no such board"));
+    }
+    let mut links = Vec::new();
+    for link in body.links {
+        let p = provider_of(&state, &link.provider).map_err(|(_, e)| (StatusCode::BAD_REQUEST, e))?;
+        let container = p.normalize_container(&link.container).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
+        links.push(Link { provider: link.provider, container });
+    }
+    state.trackers.links.set(q.board(), links).map(Json).map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Containers the provider can infer from where this board's sessions run.
+async fn tracker_suggestions(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Query(q): Query<BoardQuery>,
+) -> Result<Json<Vec<String>>, (StatusCode, Json<ApiError>)> {
+    let p = provider_of(&state, &provider)?;
+    let mut cwds: Vec<String> = state.engine.snapshot().await.into_iter().filter(|s| s.board == q.board()).map(|s| s.cwd).collect();
+    cwds.sort();
+    cwds.dedup();
+    Ok(Json(tokio::task::spawn_blocking(move || p.suggest_containers(&cwds)).await.unwrap_or_default()))
+}
+
+async fn list_tickets(State(state): State<AppState>, Query(q): Query<BoardQuery>) -> Json<TicketsResponse> {
+    let tasks = state.tasks.snapshot().await;
+    Json(state.trackers.open_tickets(q.board(), &tasks).await)
+}
+
+#[derive(Deserialize)]
+struct ImportBody {
+    provider: String,
+    key: String,
+    board: Option<String>,
+    stage: Option<Stage>,
+}
+
+/// Ticket → task. Idempotent: a ticket already on the board returns its task.
+/// `stage` is a column id on the board; omitted means its intake column.
+async fn import_ticket(State(state): State<AppState>, Json(body): Json<ImportBody>) -> Result<Json<Task>, (StatusCode, Json<ApiError>)> {
+    let board = body.board.as_deref().unwrap_or(DEFAULT_BOARD_ID);
+    if state.boards.get(board).is_none() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "no such board"));
+    }
+    let p = provider_of(&state, &body.provider)?;
+    let ticket = p.get(state.trackers.creds.as_ref(), &body.key).await.map_err(|e| api_error(StatusCode::BAD_GATEWAY, e))?;
+    // No stage → the board's intake column, same as quick-add.
+    state
+        .tasks
+        .create_from_ticket(TicketRef::from(&ticket), board, body.stage.as_deref())
+        .await
+        .map(Json)
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "no such column on this board"))
 }
 
 #[derive(Deserialize)]
@@ -811,6 +946,15 @@ mod tests {
     use futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+    fn fake_trackers() -> Trackers {
+        use crate::trackers::fake::FakeProvider;
+        use crate::trackers::{MemoryCredentials, TrackerLinks, TrackerRegistry};
+        let p = FakeProvider::new("fake");
+        p.ticket("PROJ", "PROJ-1", "Fix login", "2026-01-01T00:00:00Z");
+        p.ticket("PROJ", "PROJ-2", "Speed up search", "2026-01-02T00:00:00Z");
+        Trackers::new(TrackerRegistry::new(vec![Arc::new(p)]), Arc::new(MemoryCredentials::default()), TrackerLinks::in_memory())
+    }
+
     async fn spawn_test_server() -> (String, AppState) {
         spawn_test_server_with(Arc::new(FakeOllamaClient::new("Backend / API")), SummarizeConfig::default()).await
     }
@@ -844,6 +988,7 @@ mod tests {
             terminal: TerminalManager::new(),
             // `cat` echoes input back, which is all the terminal API tests need.
             claude_bin: "/bin/cat".into(),
+            trackers: fake_trackers(),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1637,5 +1782,90 @@ mod tests {
         assert_eq!(snap.tasks.len(), 1);
         assert_eq!(snap.tasks[0].id, on_default.id);
         assert!(snap.assignments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trackers_connect_link_list_and_import_through_the_generic_api() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        let trackers: serde_json::Value = client.get(format!("{base}/trackers")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(trackers[0]["id"], "fake");
+        assert_eq!(trackers[0]["container_label"], "Project");
+        assert_eq!(trackers[0]["status"]["connected"], false);
+
+        let r = client.put(format!("{base}/trackers/nope/connection")).json(&serde_json::json!({"fields": {}})).send().await.unwrap();
+        assert_eq!(r.status(), 404);
+        let r = client.put(format!("{base}/trackers/fake/connection")).json(&serde_json::json!({"fields": {"token": "bad"}})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+        let r = client.put(format!("{base}/trackers/fake/connection")).json(&serde_json::json!({"fields": {"token": "good"}})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+
+        // Containers are normalized by the provider; unknown providers are rejected.
+        let bad = client
+            .put(format!("{base}/trackers/links?board=default"))
+            .json(&serde_json::json!({"links": [{"provider": "nope", "container": "x"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), 400);
+        let links: Vec<Link> = client
+            .put(format!("{base}/trackers/links?board=default"))
+            .json(&serde_json::json!({"links": [{"provider": "fake", "container": "proj"}]}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(links[0].container, "PROJ");
+
+        let listed: serde_json::Value = client.get(format!("{base}/tickets?board=default")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(listed["tickets"][1]["key"], "PROJ-1", "newest first");
+        assert!(listed["tickets"][1]["imported_task_id"].is_null());
+
+        let import = serde_json::json!({"provider": "fake", "key": "PROJ-1", "board": "default", "stage": "backlog"});
+        let task: Task = client.post(format!("{base}/tickets/import")).json(&import).send().await.unwrap().json().await.unwrap();
+        assert_eq!((task.title.as_str(), task.stage.as_str()), ("Fix login", "backlog"));
+        let again: Task = client.post(format!("{base}/tickets/import")).json(&import).send().await.unwrap().json().await.unwrap();
+        assert_eq!(again.id, task.id, "importing twice returns the same task");
+        assert_eq!(state.tasks.snapshot().await.tasks.len(), 1);
+
+        let listed: serde_json::Value = client.get(format!("{base}/tickets?board=default")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(listed["tickets"][1]["imported_task_id"], task.id.as_str());
+
+        // A column that isn't on the board is refused; no stage means the intake column.
+        let bad_col = serde_json::json!({"provider": "fake", "key": "PROJ-2", "board": "default", "stage": "nope"});
+        assert_eq!(client.post(format!("{base}/tickets/import")).json(&bad_col).send().await.unwrap().status(), 400);
+
+        let intake: Task = client
+            .post(format!("{base}/tickets/import"))
+            .json(&serde_json::json!({"provider": "fake", "key": "PROJ-2"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(intake.stage, "todo");
+
+        let missing = serde_json::json!({"provider": "fake", "key": "PROJ-404"});
+        assert_eq!(client.post(format!("{base}/tickets/import")).json(&missing).send().await.unwrap().status(), 502);
+    }
+
+    #[tokio::test]
+    async fn only_the_first_session_of_a_ticket_task_gets_the_ticket_prompt() {
+        let (_base, state) = spawn_test_server().await;
+        let ticket = TicketRef {
+            provider: "fake".into(),
+            key: "PROJ-1".into(),
+            title: "Fix login".into(),
+            url: "https://fake.example/PROJ-1".into(),
+            state: crate::trackers::TicketState::Open,
+        };
+        let prompt = ticket_prompt(&state, Some(&ticket), false).unwrap();
+        assert!(prompt.contains("PROJ-1") && prompt.contains("Fix login") && prompt.contains("https://fake.example/PROJ-1"));
+        assert_eq!(ticket_prompt(&state, Some(&ticket), true), None);
+        assert_eq!(ticket_prompt(&state, None, false), None);
     }
 }

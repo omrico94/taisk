@@ -9,6 +9,7 @@ import {
   type SessionView,
   type Task,
   type TasksSnapshot,
+  type TrackerInfo,
 } from "../types";
 
 const ACTIVE_BOARD_KEY = "sessionboard.activeBoard";
@@ -33,12 +34,14 @@ function writeActiveBoard(id: string): void {
 
 /** A drag in flight. `srcTaskId` is `ORPHAN` (see selectors) for a session dragged out of the tray. */
 export interface DragState {
-  kind: "task" | "session" | "column" | null;
+  kind: "task" | "session" | "column" | "ticket" | null;
   taskId: string | null;
   sessId: string | null;
   srcTaskId: string | null;
   /** The column being reordered (`kind: "column"`). */
   colId?: string | null;
+  /** Set for a ticket dragged out of the Tickets panel (dropping on a column imports it). */
+  ticket?: { provider: string; key: string };
 }
 
 export const NO_DRAG: DragState = { kind: null, taskId: null, sessId: null, srcTaskId: null, colId: null };
@@ -105,6 +108,9 @@ interface SessionStoreState {
   boards: Board[];
   activeBoardId: string;
   boardDialogOpen: boolean;
+  /** Ticket trackers and their connection status (`GET /trackers`). */
+  trackers: TrackerInfo[];
+  ticketsOpen: boolean;
   terminal: TerminalState;
   /** Height of the terminal pane's body, in px (user-resizable). */
   terminalHeight: number;
@@ -115,6 +121,8 @@ interface SessionStoreState {
   removeBoard: (id: string) => void;
   setActiveBoard: (id: string) => void;
   setBoardDialogOpen: (open: boolean) => void;
+  setTrackers: (trackers: TrackerInfo[]) => void;
+  setTicketsOpen: (open: boolean) => void;
   setSessions: (sessions: SessionView[]) => void;
   upsertSession: (s: SessionView) => void;
   removeSession: (id: string) => void;
@@ -167,6 +175,8 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   boards: [],
   activeBoardId: readActiveBoard(),
   boardDialogOpen: false,
+  trackers: [],
+  ticketsOpen: false,
 
   setBoards: (boards) =>
     set((state) => ({
@@ -193,6 +203,8 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
     set({ activeBoardId: id, selectedId: null, assignMenu: null, query: "" });
   },
   setBoardDialogOpen: (boardDialogOpen) => set({ boardDialogOpen }),
+  setTrackers: (trackers) => set({ trackers }),
+  setTicketsOpen: (ticketsOpen) => set({ ticketsOpen }),
   terminal: NO_TERMINAL,
   terminalHeight: loadTerminalHeight(),
 

@@ -70,6 +70,14 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
 
     let tasks = crate::tasks::TaskHub::load(&app_data_dir.join("tasks.json"));
 
+    // Ticket trackers: secrets in the OS keychain, board links in trackers.json.
+    let trackers = crate::trackers::Trackers::new(
+        crate::trackers::TrackerRegistry::default_providers(),
+        crate::trackers::default_credentials(),
+        crate::trackers::TrackerLinks::load(&app_data_dir.join("trackers.json")),
+    );
+    tokio::spawn(crate::trackers::run_ticket_refresher(trackers.clone(), tasks.clone(), crate::trackers::refresh_interval()));
+
     tokio::spawn(crate::engine::run_idle_sweeper(engine.clone(), orch_config.idle_ttl, orch_config.idle_sweep_interval));
     tokio::spawn(orchestrator::run(
         engine.clone(),
@@ -96,5 +104,6 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
         tasks,
         terminal: options.terminal,
         claude_bin: "claude".to_string(),
+        trackers,
     })
 }

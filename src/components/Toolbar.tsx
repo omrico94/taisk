@@ -16,6 +16,8 @@ export function Toolbar() {
   const sessions = useBoardSessions();
   const hideIdle = useSessionStore((s) => s.hideIdle);
   const toggleHideIdle = useSessionStore((s) => s.toggleHideIdle);
+  const ticketsOpen = useSessionStore((s) => s.ticketsOpen);
+  const setTicketsOpen = useSessionStore((s) => s.setTicketsOpen);
 
   const workingCount = sessions.filter((s) => s.state === "Working").length;
   const waitingCount = sessions.filter((s) => s.state === "Waiting").length;
@@ -44,6 +46,14 @@ export function Toolbar() {
           {hideIdle ? `${idleCount} idle hidden` : `Hide ${idleCount} idle`}
         </button>
       )}
+      <button
+        className={`${styles.idleToggle} ${ticketsOpen ? styles.idleToggleActive : ""}`}
+        onClick={() => setTicketsOpen(!ticketsOpen)}
+        title="Import tickets from GitHub and other trackers"
+        data-testid="tickets-button"
+      >
+        Tickets
+      </button>
       <StatusPill workingCount={workingCount} waitingCount={waitingCount} />
       <span className={styles.caption}>
         100% local{backend && ` · ${backend === "native" ? "Claude-native" : "Ollama"} + LanceDB`}
