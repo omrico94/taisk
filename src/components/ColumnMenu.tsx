@@ -1,19 +1,13 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { addColumn, deleteColumn, reorderColumns, setColumnRoles, updateColumn } from "../api";
+import { addColumn, deleteColumn, reorderColumns, updateColumn } from "../api";
 import { useSessionStore } from "../store/sessionStore";
 import { COLUMN_PALETTE } from "../store/selectors";
-import type { BoardColumns, Column, ColumnRole } from "../types";
+import type { BoardColumns, Column } from "../types";
 import { moveColumn } from "./boardActions";
 import styles from "./Kanban.module.css";
 
 const MENU_W = 250;
-
-const ROLES: { role: ColumnRole; label: string; hint: string }[] = [
-  { role: "done", label: "Finished column", hint: "Cards here are shown as done (dimmed)" },
-  { role: "active", label: "Highlighted column", hint: "Gets the bright accent, like In Progress" },
-  { role: "intake", label: "Quick-add column", hint: "⌥⌘N files new tasks here" },
-];
 
 interface Props {
   column: Column;
@@ -25,7 +19,7 @@ interface Props {
   onRename: () => void;
 }
 
-/** A column's ⋯ menu: rename, color, reorder, roles, delete.
+/** A column's ⋯ menu: rename, color, reorder, add a neighbor, delete.
  * `position: fixed` in a portal so it escapes the board's overflow clipping;
  * closes on any outside click or Escape (same pattern as `AssignMenu`). */
 export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRename }: Props) {
@@ -189,25 +183,6 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
               + Add right
             </button>
           </div>
-
-          <div className={styles.menuDivider} />
-          {ROLES.map(({ role, label, hint }) => {
-            const on = layout[role] === column.id;
-            return (
-              <button
-                key={role}
-                role="menuitemcheckbox"
-                aria-checked={on}
-                className={styles.menuItem}
-                title={hint}
-                data-testid={`role-${role}`}
-                onClick={() => run(setColumnRoles(board, { [role]: on ? null : column.id }), false)}
-              >
-                <span className={styles.menuCheck}>{on ? "✓" : ""}</span>
-                {label}
-              </button>
-            );
-          })}
 
           <div className={styles.menuDivider} />
           <button

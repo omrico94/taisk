@@ -791,11 +791,10 @@ await story("E26", "Custom columns: add, rename, recolor, reorder, display roles
   await until(async () => (await order()).indexOf("in-review") === 2, "moved right via the menu");
 
   // Make QA the finished column: its cards are dimmed. Stages stay manual —
-  // a session finishing never moves its task.
-  m = await menu("in-review");
-  await m.getByTestId("role-done").click();
-  await until(async () => (await layout()).done === "in-review", "done role moved to QA");
-  await page.keyboard.press("Escape");
+  // a session finishing never moves its task. (Roles have no UI control any
+  // more — set directly through the API, same as e.g. a future settings page would.)
+  await api("/boards/default/columns/roles", "PUT", { done: "in-review" });
+  ok((await layout()).done === "in-review", "done role moved to QA");
   await addTask("in-review", "Review me");
   await until(async () => (await card("Review me").evaluate((e) => getComputedStyle(e).opacity)) === "0.7", "finished-column card is dimmed");
   await mk("r1", "A session that finishes");
