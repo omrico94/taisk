@@ -1,7 +1,15 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { openSessionTerminal, openTaskTerminal } from "../api";
-import { DEFAULT_BOARD_ID, type Board, type SearchResult, type SessionView, type Task, type TasksSnapshot } from "../types";
+import {
+  DEFAULT_BOARD_ID,
+  type Board,
+  type BoardColumns,
+  type SearchResult,
+  type SessionView,
+  type Task,
+  type TasksSnapshot,
+} from "../types";
 
 const ACTIVE_BOARD_KEY = "sessionboard.activeBoard";
 
@@ -25,13 +33,18 @@ function writeActiveBoard(id: string): void {
 
 /** A drag in flight. `srcTaskId` is `ORPHAN` (see selectors) for a session dragged out of the tray. */
 export interface DragState {
-  kind: "task" | "session" | null;
+  kind: "task" | "session" | "column" | null;
   taskId: string | null;
   sessId: string | null;
   srcTaskId: string | null;
+  /** The column being reordered (`kind: "column"`). */
+  colId?: string | null;
 }
 
-export const NO_DRAG: DragState = { kind: null, taskId: null, sessId: null, srcTaskId: null };
+export const NO_DRAG: DragState = { kind: null, taskId: null, sessId: null, srcTaskId: null, colId: null };
+
+/** Until the first snapshot arrives the board has no columns to show. */
+const NO_COLUMNS: BoardColumns = { columns: [], done: null, active: null, intake: null };
 
 /** The one terminal pane the board shows. The process behind it lives in the
  * backend, so detaching/collapsing/switching never interrupts a session. */
@@ -67,6 +80,9 @@ interface SessionStoreState {
   tasks: Task[];
   /** session id → task id (absent = unassigned). */
   assignments: Record<string, string>;
+  /** Per-board column layouts, and the layout of a board never edited. */
+  columns: Record<string, BoardColumns>;
+  defaultColumns: BoardColumns;
   query: string;
   selectedId: string | null;
   askOpen: boolean;
@@ -133,6 +149,8 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   sessions: {},
   tasks: [],
   assignments: {},
+  columns: {},
+  defaultColumns: NO_COLUMNS,
   query: "",
   selectedId: null,
   askOpen: false,
@@ -186,7 +204,8 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
       delete next[id];
       return { sessions: next, selectedId: state.selectedId === id ? null : state.selectedId };
     }),
-  setTasksSnapshot: (snap) => set({ tasks: snap.tasks, assignments: snap.assignments }),
+  setTasksSnapshot: (snap) =>
+    set({ tasks: snap.tasks, assignments: snap.assignments, columns: snap.columns, defaultColumns: snap.default_columns }),
   setQuery: (query) => set({ query }),
   selectCard: (selectedId) => set({ selectedId, replyText: "" }),
   setAskOpen: (askOpen) => set({ askOpen }),
@@ -247,4 +266,9 @@ export function useBoardSessions(): SessionView[] {
 /** Tasks on the board being viewed. */
 export function useBoardTasks(): Task[] {
   return useSessionStore(useShallow((s) => s.tasks.filter((t) => t.board === s.activeBoardId)));
+}
+
+/** Column layout of the board being viewed. */
+export function useBoardColumns(): BoardColumns {
+  return useSessionStore((s) => s.columns[s.activeBoardId] ?? s.defaultColumns);
 }

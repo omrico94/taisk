@@ -2,27 +2,50 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { getBoards, getTasks, WS_URL } from "../api";
-import { STAGES as COLUMN_STAGES } from "../store/selectors";
-import type { Board, BoardMessage, Stage, Task, TasksSnapshot } from "../types";
+import type { Board, BoardColumns, BoardMessage, Task, TasksSnapshot } from "../types";
 import { useAutoResizeWindow } from "./useAutoResizeWindow";
 import styles from "./Popup.module.css";
 
 const PANEL_WIDTH = 360;
 const PANEL_MAX_HEIGHT = 520;
 
-const accentOf = (stage: Stage) => COLUMN_STAGES.find((s) => s.key === stage)?.accent ?? "var(--tk-muted)";
+const EMPTY: TasksSnapshot = {
+  tasks: [],
+  assignments: {},
+  columns: {},
+  default_columns: { columns: [], done: null, active: null, intake: null },
+};
 
-const STAGES: { stage: Stage; label: string }[] = [
-  { stage: "inprogress", label: "In Progress" },
-  { stage: "todo", label: "To Do" },
-  { stage: "backlog", label: "Backlog" },
-  { stage: "done", label: "Done" },
-];
+/** One group per column name across boards (a column two boards share, e.g.
+ * both boards' "Done", is one group), ordered what's-live-first: active-role
+ * columns ("In Progress"), then the rest in board order, done-role last. */
+function groups(snap: TasksSnapshot, boards: Board[]): { key: string; label: string; color: string; strong: boolean; tasks: Task[] }[] {
+  const layoutOf = (board: string): BoardColumns => snap.columns[board] ?? snap.default_columns;
+  const boardIds = boards.length ? boards.map((b) => b.id) : [...new Set(snap.tasks.map((t) => t.board))];
+  const out = new Map<string, { key: string; label: string; color: string; strong: boolean; tasks: Task[]; rank: number }>();
+  boardIds.forEach((board, bi) => {
+    const layout = layoutOf(board);
+    layout.columns.forEach((col, ci) => {
+      const key = col.name.trim().toLowerCase();
+      const strong = layout.active === col.id;
+      const tasks = snap.tasks.filter((t) => t.board === board && t.stage === col.id);
+      const g = out.get(key);
+      if (g) {
+        g.tasks.push(...tasks);
+        g.strong ||= strong;
+      } else {
+        const rank = (strong ? 0 : layout.done === col.id ? 2e6 : 1e6) + bi * 1000 + ci;
+        out.set(key, { key, label: col.name, color: col.color, strong, tasks, rank });
+      }
+    });
+  });
+  return [...out.values()].sort((a, b) => a.rank - b.rank);
+}
 
 // Global-shortcut popup: read-only list of every task with its stage,
 // kept live over the same WS the main window uses.
 export function TaskPeek() {
-  const [snap, setSnap] = useState<TasksSnapshot>({ tasks: [], assignments: {} });
+  const [snap, setSnap] = useState<TasksSnapshot>(EMPTY);
   const [boards, setBoards] = useState<Board[]>([]);
   const [error, setError] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -88,17 +111,16 @@ export function TaskPeek() {
       {error && <div className={styles.error}>Can't reach the taisk engine</div>}
       <div className={styles.list} style={{ gap: 10, maxHeight: 440 }}>
         {snap.tasks.length === 0 && !error && <div className={styles.empty}>No tasks yet.</div>}
-        {STAGES.map(({ stage, label }) => {
-          const tasks = snap.tasks.filter((t) => t.stage === stage);
+        {groups(snap, boards).map(({ key, label, color, strong, tasks }) => {
           if (tasks.length === 0) return null;
           return (
-            <div key={stage}>
-              <div className={styles.stageHeader} style={{ color: accentOf(stage) }}>
+            <div key={key}>
+              <div className={styles.stageHeader} style={{ color }}>
                 {label} · {tasks.length}
               </div>
               {tasks.map((t) => (
                 <div key={t.id} className={styles.row}>
-                  <span className={`${styles.dot} ${styles[`stage_${stage}`]}`} />
+                  <span className={styles.dot} style={{ background: color, boxShadow: strong ? `0 0 8px ${color}99` : undefined }} />
                   <span className={styles.name}>{t.title}</span>
                   {sessionCount(t) > 0 && <span className={styles.meta}>{sessionCount(t)} sess.</span>}
                   {boards.length > 1 && <span className={styles.meta}>{boardName(t)}</span>}

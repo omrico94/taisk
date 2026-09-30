@@ -745,6 +745,89 @@ await story("E25", "Visual check: populated board next to the design prototype (
   }
 });
 
+await story("E26", "Custom columns: add, rename, recolor, reorder, display roles, quick-add column, delete moves tasks", async (s) => {
+  await fresh();
+  const layout = async () => {
+    const snap = (await api("/tasks")).json;
+    return snap.columns.default ?? snap.default_columns;
+  };
+  const order = async () => (await layout()).columns.map((c) => c.id);
+  const menu = async (id) => {
+    await page.getByTestId(`column-menu-${id}`).click();
+    return page.getByTestId("column-menu");
+  };
+
+  // Add
+  await page.getByTestId("add-column").getByText("+ Add column").click();
+  await page.getByLabel("New column name").fill("In Review");
+  await page.keyboard.press("Enter");
+  await col("in-review").waitFor();
+  ok(JSON.stringify(await order()) === JSON.stringify(["backlog", "todo", "inprogress", "done", "in-review"]), "appended at the end");
+
+  // Rename (double-click the label) keeps the id
+  await page.getByTestId("column-label-in-review").dblclick();
+  await page.getByLabel("Column name").fill("QA");
+  await page.keyboard.press("Enter");
+  await until(async () => (await page.getByTestId("column-label-in-review").innerText()).toUpperCase() === "QA", "renamed in the UI");
+  ok((await layout()).columns.find((c) => c.id === "in-review").name === "QA", "renamed in the backend, id unchanged");
+
+  // Recolor from the ⋯ menu
+  let m = await menu("in-review");
+  await m.getByLabel("Color #E07A8B").click();
+  await until(async () => (await layout()).columns.find((c) => c.id === "in-review").color === "#E07A8B", "recolored");
+  await s("column-menu");
+  await page.keyboard.press("Escape");
+
+  // Reorder: drag the QA header onto To Do
+  await drag(page.getByTestId("column-label-in-review"), page.getByTestId("column-todo"));
+  await until(async () => (await order()).indexOf("in-review") === 1, "QA moved to position 2");
+  // …and back one step via the menu
+  m = await menu("in-review");
+  await m.getByText("Move right →").click();
+  await until(async () => (await order()).indexOf("in-review") === 2, "moved right via the menu");
+
+  // Make QA the finished column: its cards are dimmed. Stages stay manual —
+  // a session finishing never moves its task.
+  m = await menu("in-review");
+  await m.getByTestId("role-done").click();
+  await until(async () => (await layout()).done === "in-review", "done role moved to QA");
+  await page.keyboard.press("Escape");
+  await addTask("in-review", "Review me");
+  await until(async () => (await card("Review me").evaluate((e) => getComputedStyle(e).opacity)) === "0.7", "finished-column card is dimmed");
+  await mk("r1", "A session that finishes");
+  await assignApi("r1", await taskId("Review me"));
+  await addTask("inprogress", "Still going");
+  await mk("r2", "Another session that finishes");
+  await assignApi("r2", await taskId("Still going"));
+  seed("stop", "r1"); seed("stop", "r2");
+  await sleep(1000);
+  ok((await stageOf("Still going")) === "inprogress", "a finished session doesn't move its task");
+  ok((await card("Still going").evaluate((e) => getComputedStyle(e).opacity)) === "1", "cards outside the finished column aren't dimmed");
+  await s("finished-column");
+
+  // Quick-add (no stage) lands in the intake column
+  const quick = await api("/tasks", "POST", { title: "Quick one" });
+  ok(quick.json.stage === "todo", "no stage → intake column");
+
+  // Delete Backlog, moving its task to To Do
+  await addTask("backlog", "Old idea");
+  m = await menu("backlog");
+  await m.getByText("Delete column…").click();
+  await m.getByLabel("Move tasks to").selectOption("todo");
+  await m.getByTestId("confirm-delete-column").click();
+  await until(async () => (await col("backlog").count()) === 0, "Backlog column gone");
+  ok((await colTitles("todo")).includes("Old idea"), "its task moved to To Do");
+
+  // Everything survives a reload
+  await page.reload();
+  await card("Old idea").waitFor();
+  ok(JSON.stringify(await order()) === JSON.stringify(["todo", "in-review", "inprogress", "done"]), "order persisted");
+  const labels = await page.locator("[data-testid^=column-label-]").allInnerTexts();
+  ok(JSON.stringify(labels.map((l) => l.toUpperCase())) === JSON.stringify(["TO DO", "QA", "IN PROGRESS", "DONE"]), `UI order ${labels}`);
+  ok(page.consoleErrors.length === 0, `no page errors: ${page.consoleErrors}`);
+  await s("after-reload");
+});
+
 // -------------------------------------------------------------------------------------
 await ctx?.close();
 await browser.close();

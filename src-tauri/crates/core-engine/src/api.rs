@@ -27,7 +27,7 @@ use crate::engine::{EngineCommand, EngineHandle, SessionView};
 use crate::memory_repo::{MemoryRepo, PurgeScope};
 use crate::ollama::OllamaClient;
 use crate::orchestrator::{DismissedSessions, WaitingSessions};
-use crate::tasks::{Stage, Task, TaskHub, TasksSnapshot};
+use crate::tasks::{Column, ColumnPatch, RolesPatch, Stage, Task, TaskError, TaskHub, TasksSnapshot};
 use crate::terminal::{PtyInfo, PtyOutput, SpawnSpec, TerminalManager};
 
 #[derive(Clone)]
@@ -70,6 +70,10 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(ws_events))
         .route("/boards", get(list_boards).post(create_board))
         .route("/boards/{id}", patch(update_board).delete(delete_board))
+        .route("/boards/{id}/columns", post(add_column))
+        .route("/boards/{id}/columns/order", put(reorder_columns))
+        .route("/boards/{id}/columns/roles", put(set_column_roles))
+        .route("/boards/{id}/columns/{col}", patch(update_column).delete(delete_column))
         .route("/tasks", get(get_tasks).post(create_task))
         .route("/tasks/{id}", patch(update_task).delete(delete_task))
         .route("/sessions/{id}/task", put(assign_session))
@@ -380,7 +384,8 @@ async fn get_tasks(State(state): State<AppState>) -> Json<TasksSnapshot> {
 #[derive(Deserialize)]
 struct CreateTaskBody {
     title: String,
-    stage: Stage,
+    /// Omitted means the board's intake column (quick-add).
+    stage: Option<Stage>,
     /// Board the task belongs to; omitted means the default board.
     board: Option<String>,
 }
@@ -390,7 +395,7 @@ async fn create_task(State(state): State<AppState>, Json(body): Json<CreateTaskB
     if state.boards.get(board).is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    state.tasks.create_on_board(&body.title, body.stage, board).await.map(Json).ok_or(StatusCode::BAD_REQUEST)
+    state.tasks.create_on_board(&body.title, body.stage.as_deref(), board).await.map(Json).ok_or(StatusCode::BAD_REQUEST)
 }
 
 #[derive(Serialize)]
@@ -482,12 +487,91 @@ async fn update_task(
         .map(normalize_task_directories)
         .transpose()
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
-    if !state.tasks.update(&id, body.title.as_deref(), body.stage).await {
-        return Err(api_error(StatusCode::NOT_FOUND, "no such task"));
-    }
+    state.tasks.update(&id, body.title.as_deref(), body.stage.as_deref()).await.map_err(task_error)?;
     if let Some(dirs) = directories {
         state.tasks.set_directories(&id, dirs).await;
     }
+    Ok(StatusCode::OK)
+}
+
+fn task_error(e: TaskError) -> (StatusCode, Json<ApiError>) {
+    let status = match e {
+        TaskError::NotFound => StatusCode::NOT_FOUND,
+        TaskError::Invalid(_) => StatusCode::BAD_REQUEST,
+    };
+    api_error(status, e.to_string())
+}
+
+/// Column edits are scoped to a board that exists; an unknown one is a 404.
+fn require_board(state: &AppState, board: &str) -> Result<(), (StatusCode, Json<ApiError>)> {
+    match state.boards.get(board) {
+        Some(_) => Ok(()),
+        None => Err(api_error(StatusCode::NOT_FOUND, format!("no board {board:?}"))),
+    }
+}
+
+#[derive(Deserialize)]
+struct AddColumnBody {
+    name: String,
+    color: Option<String>,
+}
+
+async fn add_column(
+    State(state): State<AppState>,
+    Path(board): Path<String>,
+    Json(body): Json<AddColumnBody>,
+) -> Result<Json<Column>, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.add_column(&board, &body.name, body.color.as_deref()).await.map(Json).map_err(task_error)
+}
+
+async fn update_column(
+    State(state): State<AppState>,
+    Path((board, col)): Path<(String, String)>,
+    Json(patch): Json<ColumnPatch>,
+) -> Result<Json<Column>, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.update_column(&board, &col, &patch).await.map(Json).map_err(task_error)
+}
+
+#[derive(Deserialize)]
+struct ReorderColumnsBody {
+    ids: Vec<String>,
+}
+
+async fn reorder_columns(
+    State(state): State<AppState>,
+    Path(board): Path<String>,
+    Json(body): Json<ReorderColumnsBody>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.reorder_columns(&board, &body.ids).await.map_err(task_error)?;
+    Ok(StatusCode::OK)
+}
+
+async fn set_column_roles(
+    State(state): State<AppState>,
+    Path(board): Path<String>,
+    Json(patch): Json<RolesPatch>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.set_roles(&board, &patch).await.map_err(task_error)?;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+struct DeleteColumnQuery {
+    move_tasks_to: String,
+}
+
+/// Deletes a column; its tasks move to `?move_tasks_to=<column id>`.
+async fn delete_column(
+    State(state): State<AppState>,
+    Path((board, col)): Path<(String, String)>,
+    Query(q): Query<DeleteColumnQuery>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_board(&state, &board)?;
+    state.tasks.delete_column(&board, &col, &q.move_tasks_to).await.map_err(task_error)?;
     Ok(StatusCode::OK)
 }
 
@@ -827,7 +911,12 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(task.stage, Stage::Todo);
+        assert_eq!(task.stage, "todo");
+        // A stage that isn't a column on the board is rejected.
+        let r = client.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "X", "stage": "nope"})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+        let r = client.patch(format!("{base}/tasks/{}", task.id)).json(&serde_json::json!({"stage": "nope"})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
 
         let r = client.patch(format!("{base}/tasks/{}", task.id)).json(&serde_json::json!({"stage": "inprogress"})).send().await.unwrap();
         assert_eq!(r.status(), 200);
@@ -840,7 +929,7 @@ mod tests {
         let r = client.put(format!("{base}/sessions/s1/task")).json(&serde_json::json!({"task_id": "nope"})).send().await.unwrap();
         assert_eq!(r.status(), 404);
         let snap: TasksSnapshot = client.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
-        assert_eq!(snap.tasks[0].stage, Stage::InProgress);
+        assert_eq!(snap.tasks[0].stage, "inprogress");
         assert_eq!(snap.assignments.get("s1"), Some(&task.id));
         client.put(format!("{base}/sessions/s1/task")).json(&serde_json::json!({"task_id": null})).send().await.unwrap();
         assert!(state.tasks.snapshot().await.assignments.is_empty());
@@ -853,6 +942,78 @@ mod tests {
         assert_eq!(client.delete(format!("{base}/tasks/{}", task.id)).send().await.unwrap().status(), 200);
         let snap = state.tasks.snapshot().await;
         assert!(snap.tasks.is_empty() && snap.assignments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn columns_can_be_added_edited_reordered_and_deleted() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+        let cols = |snap: &TasksSnapshot| -> Vec<String> {
+            snap.columns.get("default").unwrap_or(&snap.default_columns).columns.iter().map(|c| c.id.clone()).collect()
+        };
+
+        // Untouched board: defaults are served, nothing stored yet.
+        let snap: TasksSnapshot = client.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
+        assert!(snap.columns.is_empty());
+        assert_eq!(cols(&snap), ["backlog", "todo", "inprogress", "done"]);
+
+        // No stage: filed in the board's intake column (quick-add).
+        let quick: Task = client.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "Q"})).send().await.unwrap().json().await.unwrap();
+        assert_eq!(quick.stage, "todo");
+        state.tasks.delete(&quick.id).await;
+
+        let col: Column = client
+            .post(format!("{base}/boards/default/columns"))
+            .json(&serde_json::json!({"name": "In Review", "color": "#e07a8b"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!((col.id.as_str(), col.color.as_str()), ("in-review", "#E07A8B"));
+        let r = client.post(format!("{base}/boards/nope/columns")).json(&serde_json::json!({"name": "X"})).send().await.unwrap();
+        assert_eq!(r.status(), 404);
+        let r = client.post(format!("{base}/boards/default/columns")).json(&serde_json::json!({"name": " "})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+
+        let r = client
+            .patch(format!("{base}/boards/default/columns/in-review"))
+            .json(&serde_json::json!({"name": "Review", "color": "#7c9ce0"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let r = client
+            .patch(format!("{base}/boards/default/columns/inprogress"))
+            .json(&serde_json::json!({"color": "red"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+
+        let order = ["todo", "inprogress", "in-review", "done", "backlog"];
+        let r = client.put(format!("{base}/boards/default/columns/order")).json(&serde_json::json!({"ids": order})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = client.put(format!("{base}/boards/default/columns/order")).json(&serde_json::json!({"ids": ["todo"]})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+
+        let r = client.put(format!("{base}/boards/default/columns/roles")).json(&serde_json::json!({"done": "in-review"})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = client.put(format!("{base}/boards/default/columns/roles")).json(&serde_json::json!({"active": "nope"})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+
+        let task = state.tasks.create("A", "in-review").await.unwrap();
+        let r = client.delete(format!("{base}/boards/default/columns/in-review?move_tasks_to=in-review")).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+        let r = client.delete(format!("{base}/boards/default/columns/in-review?move_tasks_to=done")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+
+        let snap = state.tasks.snapshot().await;
+        assert_eq!(cols(&snap), ["todo", "inprogress", "done", "backlog"]);
+        let layout = &snap.columns["default"];
+        assert_eq!(layout.done, None, "the deleted column's role is unset, not guessed");
+        assert_eq!(snap.tasks.iter().find(|t| t.id == task.id).unwrap().stage, "done");
     }
 
     #[tokio::test]
@@ -887,7 +1048,7 @@ mod tests {
         use futures::SinkExt;
         let (base, state) = spawn_test_server().await;
         let client = reqwest::Client::new();
-        let task = state.tasks.create("Billing", Stage::Todo).await.unwrap();
+        let task = state.tasks.create("Billing", "todo").await.unwrap();
 
         // Unknown task -> 404, no process spawned.
         let resp = client.post(format!("{base}/terminals/tasks/nope")).send().await.unwrap();
@@ -944,7 +1105,7 @@ mod tests {
     async fn task_directories_are_validated_and_drive_the_new_sessions_cwd_and_add_dirs() {
         let (base, state) = spawn_test_server().await;
         let client = reqwest::Client::new();
-        let task = state.tasks.create("Multi-repo", Stage::Todo).await.unwrap();
+        let task = state.tasks.create("Multi-repo", "todo").await.unwrap();
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
         let a_path = a.path().to_string_lossy().to_string();

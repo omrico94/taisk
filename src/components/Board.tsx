@@ -1,8 +1,8 @@
 import { useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { useBoardSessions, useBoardTasks, useSessionStore } from "../store/sessionStore";
-import { STAGES, matchesQuery, orphanSessions, sessionsOfTask } from "../store/selectors";
-import { Column } from "./Column";
+import { useBoardColumns, useBoardSessions, useBoardTasks, useSessionStore } from "../store/sessionStore";
+import { matchesQuery, orphanSessions, sessionsOfTask } from "../store/selectors";
+import { AddColumn, Column } from "./Column";
 import { UnassignedTray } from "./UnassignedTray";
 import { useFlip } from "./useFlip";
 import styles from "./Kanban.module.css";
@@ -10,6 +10,7 @@ import styles from "./Kanban.module.css";
 export function Board() {
   const sessions = useBoardSessions();
   const tasks = useBoardTasks();
+  const layout = useBoardColumns();
   const assignments = useSessionStore(useShallow((s) => s.assignments));
   const query = useSessionStore((s) => s.query);
   const hideIdle = useSessionStore((s) => s.hideIdle);
@@ -54,17 +55,17 @@ export function Board() {
         </div>
       )}
       <div className={styles.columns}>
-        {STAGES.map((st) => (
+        {layout.columns.map((col) => (
           <Column
-            key={st.key}
-            stage={st.key}
-            label={st.label}
-            accent={st.accent}
-            tasks={visibleTasks.filter((t) => t.stage === st.key)}
+            key={col.id}
+            column={col}
+            layout={layout}
+            tasks={visibleTasks.filter((t) => t.stage === col.id)}
             sessions={sessions}
             assignments={assignments}
           />
         ))}
+        {layout.columns.length > 0 && <AddColumn />}
       </div>
     </div>
   );

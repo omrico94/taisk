@@ -16,7 +16,13 @@ its Unix socket and writing fixture transcripts where Claude Code would.
 import json, os, socket, sys, time
 
 HOME = os.environ.get("HOME")
-SOCK = os.path.join(HOME, "Library", "Application Support", "SessionBoard", "engine.sock")
+# The engine's app data dir (Rust's `dirs::data_dir()` + "taisk").
+DATA_DIR = (
+    os.path.join(HOME, "Library", "Application Support")
+    if sys.platform == "darwin"
+    else os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local", "share")
+)
+SOCK = os.path.join(DATA_DIR, "taisk", "engine.sock")
 PROJECTS = os.path.join(HOME, ".claude", "projects")
 TASKS = os.path.join(HOME, ".claude", "tasks")
 META = os.path.join(os.path.dirname(SOCK), "e2e-meta.json")  # id -> cwd, so later commands can find the transcript

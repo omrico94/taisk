@@ -99,8 +99,4 @@
 }
 
 .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-.stage_inprogress { background: var(--tk-col-inprogress); box-shadow: 0 0 8px rgba(200, 255, 61, 0.6); }
-.stage_todo { background: var(--tk-col-todo); }
-.stage_backlog { background: var(--tk-col-backlog); }
-.stage_done { background: var(--tk-col-done); }
 .empty { color: var(--text-muted); font-size: 13px; padding: 12px 4px; }

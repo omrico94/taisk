@@ -1,4 +1,4 @@
-import { assignSession, updateTask } from "../api";
+import { assignSession, reorderColumns, updateTask } from "../api";
 import { ORPHAN } from "../store/selectors";
 import { NO_DRAG, useSessionStore, type DragState } from "../store/sessionStore";
 import type { Stage } from "../types";
@@ -18,6 +18,16 @@ export function moveTask(taskId: string, stage: Stage): void {
   const task = useSessionStore.getState().tasks.find((t) => t.id === taskId);
   if (!task || task.stage === stage) return;
   void updateTask(taskId, { stage });
+}
+
+/** Moves a column of the active board to position `toIndex`. */
+export function moveColumn(colId: string, toIndex: number): void {
+  const { activeBoardId, columns, defaultColumns } = useSessionStore.getState();
+  const ids = (columns[activeBoardId] ?? defaultColumns).columns.map((c) => c.id);
+  const from = ids.indexOf(colId);
+  if (from < 0 || toIndex < 0 || toIndex >= ids.length || from === toIndex) return;
+  ids.splice(toIndex, 0, ...ids.splice(from, 1));
+  reorderColumns(activeBoardId, ids).catch((err) => console.error("Failed to reorder columns:", err));
 }
 
 // The drag in flight, readable synchronously by drag handlers. The store copy
