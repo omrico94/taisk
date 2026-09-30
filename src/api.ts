@@ -1,4 +1,4 @@
-import type { Board, SearchResult, SessionView, Stage, Task, TasksSnapshot } from "./types";
+import type { Board, Column, ColumnRole, SearchResult, SessionView, Stage, Task, TasksSnapshot } from "./types";
 
 // Matches src-tauri/src/lib.rs's API_PORT constant — the desktop app's own
 // Core Engine instance. A future Phase-3 VS Code extension would need real
@@ -49,12 +49,13 @@ export async function getTasks(): Promise<TasksSnapshot> {
   return resp.json();
 }
 
-/** Throws on a rejected (e.g. blank-title) request so callers can surface it. */
-export async function createTask(title: string, stage: Stage, board: string): Promise<Task> {
+/** Throws on a rejected (e.g. blank-title) request so callers can surface it.
+ * `stage: null` files the task in the board's intake column. */
+export async function createTask(title: string, stage: Stage | null, board: string): Promise<Task> {
   const resp = await fetch(`${API_BASE}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, stage, board }),
+    body: JSON.stringify(stage === null ? { title, board } : { title, stage, board }),
   });
   if (!resp.ok) throw new Error(`Failed to create task "${title}" (${resp.status})`);
   return resp.json();
@@ -123,6 +124,44 @@ export async function renameBoard(id: string, name: string): Promise<Board> {
 
 export async function deleteBoard(id: string): Promise<void> {
   await boardRequest(`${API_BASE}/boards/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// Column edits: the resulting layout comes back over the WS as part of the
+// next `TasksChanged` snapshot, like every other task mutation.
+const columnsUrl = (board: string) => `${API_BASE}/boards/${encodeURIComponent(board)}/columns`;
+const jsonInit = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+export async function addColumn(board: string, name: string): Promise<Column> {
+  const resp = await boardRequest(columnsUrl(board), jsonInit("POST", { name }));
+  return resp.json();
+}
+
+/** `wip_limit: null` clears the limit. */
+export async function updateColumn(
+  board: string,
+  id: string,
+  patch: { name?: string; color?: string; wip_limit?: number | null },
+): Promise<void> {
+  await boardRequest(`${columnsUrl(board)}/${encodeURIComponent(id)}`, jsonInit("PATCH", patch));
+}
+
+export async function reorderColumns(board: string, ids: string[]): Promise<void> {
+  await boardRequest(`${columnsUrl(board)}/order`, jsonInit("PUT", { ids }));
+}
+
+/** `null` unsets a role; roles left out are unchanged. */
+export async function setColumnRoles(board: string, roles: Partial<Record<ColumnRole, string | null>>): Promise<void> {
+  await boardRequest(`${columnsUrl(board)}/roles`, jsonInit("PUT", roles));
+}
+
+/** Tasks in the deleted column move to `moveTasksTo`. */
+export async function deleteColumn(board: string, id: string, moveTasksTo: string): Promise<void> {
+  const q = `move_tasks_to=${encodeURIComponent(moveTasksTo)}`;
+  await boardRequest(`${columnsUrl(board)}/${encodeURIComponent(id)}?${q}`, { method: "DELETE" });
 }
 
 /** A pty is a real `claude` process kept alive by the backend (see terminal.rs). */

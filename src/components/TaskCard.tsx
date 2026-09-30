@@ -10,9 +10,11 @@ import styles from "./Kanban.module.css";
 interface Props {
   task: Task;
   sessions: SessionView[];
+  /** The card sits in its board's done-role column (dimmed, green bar). */
+  done: boolean;
 }
 
-export function TaskCard({ task, sessions }: Props) {
+export function TaskCard({ task, sessions, done }: Props) {
   const collapsed = useSessionStore((s) => s.collapsedTasks.has(task.id));
   const toggle = useSessionStore((s) => s.toggleTaskCollapsed);
   const drag = useSessionStore((s) => s.drag);
@@ -42,7 +44,7 @@ export function TaskCard({ task, sessions }: Props) {
   const cls = [
     styles.taskCard,
     roll.needsYou ? styles.taskNeeds : roll.anyWorking ? styles.taskWorking : "",
-    task.stage === "done" ? styles.taskDone : "",
+    done ? styles.taskDone : "",
     sessionOver ? styles.taskDropTarget : "",
   ].join(" ");
 
@@ -118,7 +120,7 @@ export function TaskCard({ task, sessions }: Props) {
             <div className={styles.rollTrack}>
               <div
                 className={styles.rollFill}
-                style={{ width: `${roll.pct}%`, background: task.stage === "done" ? "var(--tk-done)" : "var(--tk-lime)" }}
+                style={{ width: `${roll.pct}%`, background: done ? "var(--tk-done)" : "var(--tk-lime)" }}
               />
             </div>
             <span className={styles.rollLabel}>

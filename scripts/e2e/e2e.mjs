@@ -160,7 +160,7 @@ await story("E01", "First launch, empty board", async (s) => {
   ok((await page.getByTestId("tray").count()) === 0, "tray hidden when there are no sessions");
   const pill = await page.locator("[class*=pill]").first().innerText();
   ok(/0\s*working/.test(pill.replace(/\n/g, " ")) && /0\s*need you/.test(pill.replace(/\n/g, " ")), `status pill: ${pill}`);
-  ok((await page.getByTestId("wip-badge").innerText()) === "WIP 0/5", "WIP badge 0/5");
+  ok((await page.getByTestId("wip-badge-inprogress").innerText()) === "WIP 0/5", "WIP badge 0/5");
   await s("empty-board");
 });
 
@@ -334,15 +334,16 @@ await story("E08", "Drag a task card across every column (highlight, ghost opaci
 await story("E09", "WIP badge turns red past the limit", async (s) => {
   await fresh();
   for (let i = 1; i <= 5; i++) await addTask("inprogress", `WIP task ${i}`);
-  const badge = page.getByTestId("wip-badge");
+  const badge = page.getByTestId("wip-badge-inprogress");
   ok((await badge.innerText()) === "WIP 5/5", "5/5 at the limit");
   const c5 = await badge.evaluate((e) => getComputedStyle(e).color);
-  ok(c5 !== "rgb(248, 113, 113)", "not red at the limit");
+  const RED = "rgb(255, 143, 143)"; // --tk-danger-text
+  ok(c5 !== RED, "not red at the limit");
   await s("wip-at-limit");
   await addTask("inprogress", "WIP task 6");
   ok((await badge.innerText()) === "WIP 6/5", "6/5 over the limit");
   const c6 = await badge.evaluate((e) => getComputedStyle(e).color);
-  ok(c6 === "rgb(248, 113, 113)", `red over the limit, got ${c6}`);
+  ok(c6 === RED, `red over the limit, got ${c6}`);
   await s("wip-over-limit");
 });
 
@@ -761,6 +762,87 @@ await story("E25", "Visual check: populated board next to the design prototype (
     else await dp.screenshot({ path: path.join(OUT, "E25-design-reference.png") });
     await dp.close();
   }
+});
+
+await story("E26", "Custom columns: add, rename, recolor, WIP, reorder, roles drive the rollup, delete moves tasks", async (s) => {
+  await fresh();
+  const layout = async () => {
+    const snap = (await api("/tasks")).json;
+    return snap.columns.default ?? snap.default_columns;
+  };
+  const order = async () => (await layout()).columns.map((c) => c.id);
+  const menu = async (id) => {
+    await page.getByTestId(`column-menu-${id}`).click();
+    return page.getByTestId("column-menu");
+  };
+
+  // Add
+  await page.getByTestId("add-column").getByText("+ Add column").click();
+  await page.getByLabel("New column name").fill("In Review");
+  await page.keyboard.press("Enter");
+  await col("in-review").waitFor();
+  ok(JSON.stringify(await order()) === JSON.stringify(["backlog", "todo", "inprogress", "done", "in-review"]), "appended at the end");
+
+  // Rename (double-click the label) keeps the id
+  await page.getByTestId("column-label-in-review").dblclick();
+  await page.getByLabel("Column name").fill("QA");
+  await page.keyboard.press("Enter");
+  await until(async () => (await page.getByTestId("column-label-in-review").innerText()).toUpperCase() === "QA", "renamed in the UI");
+  ok((await layout()).columns.find((c) => c.id === "in-review").name === "QA", "renamed in the backend, id unchanged");
+
+  // Recolor + WIP limit from the ⋯ menu
+  let m = await menu("in-review");
+  await m.getByLabel("Color #E07A8B").click();
+  await until(async () => (await layout()).columns.find((c) => c.id === "in-review").color === "#E07A8B", "recolored");
+  await m.getByLabel("WIP limit").fill("1");
+  await page.keyboard.press("Enter");
+  await page.getByTestId("wip-badge-in-review").waitFor();
+  ok((await page.getByTestId("wip-badge-in-review").innerText()) === "WIP 0/1", "WIP badge appears");
+  await s("column-menu");
+  await page.keyboard.press("Escape");
+
+  // Reorder: drag the QA header onto To Do
+  await drag(page.getByTestId("column-label-in-review"), page.getByTestId("column-todo"));
+  await until(async () => (await order()).indexOf("in-review") === 1, "QA moved to position 2");
+  // …and back one step via the menu
+  m = await menu("in-review");
+  await m.getByText("Move right →").click();
+  await until(async () => (await order()).indexOf("in-review") === 2, "moved right via the menu");
+
+  // Make QA the auto-done column: the rollup now lands there
+  m = await menu("in-review");
+  await m.getByTestId("role-done").click();
+  await until(async () => (await layout()).done === "in-review", "done role moved to QA");
+  await page.keyboard.press("Escape");
+  await addTask("inprogress", "Review me");
+  await mk("r1", "A session that finishes");
+  await assignApi("r1", await taskId("Review me"));
+  seed("stop", "r1");
+  await until(async () => (await colTitles("in-review")).includes("Review me"), "rollup moved the task to QA live");
+  ok((await page.getByTestId("wip-badge-in-review").innerText()) === "WIP 1/1", "WIP counts it");
+  await s("rollup-into-custom-column");
+
+  // Quick-add (no stage) lands in the intake column
+  const quick = await api("/tasks", "POST", { title: "Quick one" });
+  ok(quick.json.stage === "todo", "no stage → intake column");
+
+  // Delete Backlog, moving its task to To Do
+  await addTask("backlog", "Old idea");
+  m = await menu("backlog");
+  await m.getByText("Delete column…").click();
+  await m.getByLabel("Move tasks to").selectOption("todo");
+  await m.getByTestId("confirm-delete-column").click();
+  await until(async () => (await col("backlog").count()) === 0, "Backlog column gone");
+  ok((await colTitles("todo")).includes("Old idea"), "its task moved to To Do");
+
+  // Everything survives a reload
+  await page.reload();
+  await card("Old idea").waitFor();
+  ok(JSON.stringify(await order()) === JSON.stringify(["todo", "in-review", "inprogress", "done"]), "order persisted");
+  const labels = await page.locator("[data-testid^=column-label-]").allInnerTexts();
+  ok(JSON.stringify(labels.map((l) => l.toUpperCase())) === JSON.stringify(["TO DO", "QA", "IN PROGRESS", "DONE"]), `UI order ${labels}`);
+  ok(page.consoleErrors.length === 0, `no page errors: ${page.consoleErrors}`);
+  await s("after-reload");
 });
 
 // -------------------------------------------------------------------------------------

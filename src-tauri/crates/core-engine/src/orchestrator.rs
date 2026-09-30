@@ -1771,7 +1771,7 @@ mod tests {
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
-        let task = tasks.create("Billing", crate::tasks::Stage::Todo).await.expect("task should be created");
+        let task = tasks.create("Billing", crate::tasks::stage::TODO).await.expect("task should be created");
 
         tokio::spawn(run(
             engine.clone(),

@@ -1,14 +1,7 @@
-import type { SessionView, Stage, Task, TasksSnapshot } from "../types";
+import type { SessionView, Task, TasksSnapshot } from "../types";
 
-export const STAGES: { key: Stage; label: string; accent: string }[] = [
-  { key: "backlog", label: "Backlog", accent: "#A08FC4" },
-  { key: "todo", label: "To Do", accent: "#6FB9C9" },
-  { key: "inprogress", label: "In Progress", accent: "#C8FF3D" },
-  { key: "done", label: "Done", accent: "#86B98C" },
-];
-
-/** Design constant: In Progress column's WIP limit. */
-export const WIP_LIMIT = 5;
+/** Swatches offered in a column's menu (the backend's palette for new columns). */
+export const COLUMN_PALETTE = ["#A08FC4", "#6FB9C9", "#C8FF3D", "#86B98C", "#E0A458", "#E07A8B", "#7C9CE0", "#C9B26F"];
 
 /** Sentinel for `drag.srcTaskId` when a session is dragged out of the tray. */
 export const ORPHAN = "__orphan__";
