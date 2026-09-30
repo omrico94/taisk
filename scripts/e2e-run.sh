@@ -17,7 +17,7 @@ case "${1:-}" in
     ( cd "$ROOT/src-tauri" && cargo build -q -p core-engine --example dev_server )
     BIN="$ROOT/src-tauri/target/debug/examples/dev_server"
     HOME="$E2E_HOME" SESSIONBOARD_IDLE_TTL_SECS=${IDLE:-600} SESSIONBOARD_DONE_TTL_SECS=${DONE:-600} \
-      SESSIONBOARD_SWEEP_INTERVAL_SECS=${SWEEP:-5} SESSIONBOARD_FAKE_OLLAMA=1 SESSIONBOARD_API_PORT=${PORT:-37999} nohup "$BIN" > "$E2E_HOME/server.log" 2>&1 &
+      SESSIONBOARD_SWEEP_INTERVAL_SECS=${SWEEP:-5} SESSIONBOARD_FAKE_OLLAMA=1 SESSIONBOARD_EPHEMERAL_CREDENTIALS=1 SESSIONBOARD_API_PORT=${PORT:-37999} nohup "$BIN" > "$E2E_HOME/server.log" 2>&1 &
     echo $! > "$PIDFILE"
     for _ in $(seq 1 60); do curl -sf http://127.0.0.1:${PORT:-37999}/tasks >/dev/null && { echo "up (pid $(cat "$PIDFILE"))"; exit 0; }; sleep 0.5; done
     echo "server did not come up"; cat "$E2E_HOME/server.log"; exit 1 ;;

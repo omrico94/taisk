@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, Mutex};
 
 use crate::engine::{EngineHandle, SessionId, SessionView};
 use crate::state::SessionState;
+use crate::trackers::{TicketRef, TicketState};
 
 pub type TaskId = String;
 
@@ -47,6 +48,10 @@ pub struct Task {
     /// existed deserialize to the default board.
     #[serde(default = "default_board")]
     pub board: String,
+    /// The tracker ticket this task was imported from (see `trackers`).
+    /// Tasks saved before trackers existed deserialize to `None`.
+    #[serde(default)]
+    pub ticket: Option<TicketRef>,
 }
 
 fn default_board() -> String {
@@ -114,9 +119,49 @@ impl TaskStore {
         if title.is_empty() {
             return None;
         }
-        let task = Task { id: new_task_id(), title: title.to_string(), stage, created_at_ms: crate::now_ms(), board: board.to_string() };
+        let task =
+            Task { id: new_task_id(), title: title.to_string(), stage, created_at_ms: crate::now_ms(), board: board.to_string(), ticket: None };
         self.data.tasks.push(task.clone());
         Some(task)
+    }
+
+    /// Idempotent per `(board, provider, key)`: importing a ticket that
+    /// already has a task on this board returns that task (`false` = no
+    /// change) instead of making a duplicate.
+    pub fn create_from_ticket(&mut self, ticket: TicketRef, board: &str, stage: Stage) -> (Task, bool) {
+        let existing = self.data.tasks.iter().find(|t| {
+            t.board == board && t.ticket.as_ref().is_some_and(|r| r.provider == ticket.provider && r.key == ticket.key)
+        });
+        if let Some(t) = existing {
+            return (t.clone(), false);
+        }
+        let title = match ticket.title.trim() {
+            "" => ticket.key.clone(),
+            t => t.to_string(),
+        };
+        let task = Task {
+            id: new_task_id(),
+            title,
+            stage,
+            created_at_ms: crate::now_ms(),
+            board: board.to_string(),
+            ticket: Some(ticket),
+        };
+        self.data.tasks.push(task.clone());
+        (task, true)
+    }
+
+    /// Updates the state on every task linked to `(provider, key)` (it may
+    /// be imported on several boards). Returns whether anything changed.
+    pub fn set_ticket_state(&mut self, provider: &str, key: &str, state: TicketState) -> bool {
+        let mut changed = false;
+        for r in self.data.tasks.iter_mut().filter_map(|t| t.ticket.as_mut()) {
+            if r.provider == provider && r.key == key && r.state != state {
+                r.state = state;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Returns whether the task exists. `None` fields are left unchanged; a
@@ -293,6 +338,22 @@ impl TaskHub {
             let t = s.create_on_board(title, stage, board);
             let changed = t.is_some();
             (t, changed)
+        })
+        .await
+    }
+
+    pub async fn create_from_ticket(&self, ticket: TicketRef, board: &str, stage: Stage) -> Task {
+        self.mutate(|s| s.create_from_ticket(ticket, board, stage)).await
+    }
+
+    /// `(provider, key, state)` triples, applied as one change/broadcast.
+    pub async fn set_ticket_states(&self, updates: &[(String, String, TicketState)]) {
+        self.mutate(|s| {
+            let mut changed = false;
+            for (provider, key, state) in updates {
+                changed |= s.set_ticket_state(provider, key, *state);
+            }
+            ((), changed)
         })
         .await
     }
@@ -509,6 +570,38 @@ mod tests {
         s.assign("gone", Some(&t.id));
         assert!(!s.rollup(&[]));
         assert_eq!(s.snapshot().tasks[0].stage, Stage::Todo);
+    }
+
+    fn ticket(key: &str) -> TicketRef {
+        TicketRef { provider: "github".into(), key: key.into(), title: "Fix login".into(), url: "u".into(), state: TicketState::Open }
+    }
+
+    #[test]
+    fn tasks_saved_before_trackers_existed_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        std::fs::write(&path, r#"{"tasks":[{"id":"t1","title":"A","stage":"todo","created_at_ms":0}],"assignments":{}}"#).unwrap();
+        let snap = TaskStore::load(&path).snapshot();
+        assert_eq!(snap.tasks[0].ticket, None);
+        assert_eq!(snap.tasks[0].board, crate::boards::DEFAULT_BOARD_ID);
+    }
+
+    #[test]
+    fn importing_a_ticket_is_idempotent_per_board() {
+        let (mut s, _d) = store();
+        let (a, created) = s.create_from_ticket(ticket("o/r#1"), "default", Stage::Todo);
+        assert!(created);
+        assert_eq!(a.title, "Fix login");
+        let (again, created) = s.create_from_ticket(ticket("o/r#1"), "default", Stage::Backlog);
+        assert!(!created);
+        assert_eq!(again.id, a.id);
+        let (other_board, created) = s.create_from_ticket(ticket("o/r#1"), "work", Stage::Todo);
+        assert!(created && other_board.id != a.id);
+
+        // State follows the ticket on every board it was imported to, once.
+        assert!(s.set_ticket_state("github", "o/r#1", TicketState::Closed));
+        assert!(!s.set_ticket_state("github", "o/r#1", TicketState::Closed));
+        assert!(s.snapshot().tasks.iter().all(|t| t.ticket.as_ref().unwrap().state == TicketState::Closed));
     }
 
     #[tokio::test]

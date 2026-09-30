@@ -62,6 +62,67 @@ export interface Task {
   created_at_ms: number;
   /** Board this task lives on. */
   board: string;
+  /** The tracker ticket this task was imported from, if any. */
+  ticket?: TicketRef | null;
+}
+
+// Ticket trackers (GitHub, …). Everything here is provider-neutral — the UI
+// renders whatever `GET /trackers` describes (see core-engine's trackers/mod.rs).
+
+export type TicketState = "open" | "closed";
+
+export interface TicketRef {
+  provider: string;
+  /** The provider's own id: "owner/repo#12", "ENG-42", … */
+  key: string;
+  title: string;
+  url: string;
+  state: TicketState;
+}
+
+export interface Ticket extends TicketRef {
+  /** Repo / team / project it lives in. */
+  container: string;
+  labels: string[];
+  assignee: string | null;
+  updated_at: string;
+  /** The task already linked to it on the requested board. */
+  imported_task_id: string | null;
+}
+
+export interface AuthField {
+  name: string;
+  label: string;
+  secret: boolean;
+  help: string | null;
+  help_url: string | null;
+}
+
+export interface ConnectionStatus {
+  connected: boolean;
+  account: string | null;
+  /** Where the credentials came from, e.g. "keychain" or "gh". */
+  source: string | null;
+  error: string | null;
+}
+
+export interface TrackerInfo {
+  id: string;
+  name: string;
+  container_label: string;
+  container_placeholder: string;
+  auth_fields: AuthField[];
+  status: ConnectionStatus;
+}
+
+export interface TrackerLink {
+  provider: string;
+  container: string;
+}
+
+export interface TicketsResponse {
+  tickets: Ticket[];
+  errors: { provider: string; container: string; error: string }[];
 }
 
 /** session id → task id. A session absent from the map is unassigned. */

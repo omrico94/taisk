@@ -104,6 +104,16 @@ If a session still doesn't show up, check `~/.claude/projects/<sanitized-cwd>/<s
 
 **Rollup is backend-owned and edge-triggered** (`TaskStore::rollup`, driven by `tasks::run_rollup` on every engine diff): a task moves to `Done` at the moment all its live sessions *become* settled (`Done` or `Idle`), and back to `InProgress` when a settled `Done` task gets a live session again. Edge-triggering (not "all done ⇒ Done" on every diff) is deliberate: it stops a manual drag out of Done from bouncing straight back. After a restart the first observation of a task only records its state (reconstruction re-adds sessions gradually), except that a `Done` task found with a live session is pulled back to `InProgress`. A delete of a session drops its assignment; deleting a task orphans its sessions.
 
+### Ticket trackers (GitHub issues → tasks)
+
+`trackers/mod.rs` is a **tracker-agnostic** layer; `trackers/github.rs` is the only GitHub-specific code. Tasks (`Task.ticket: Option<TicketRef>`), the API (`/trackers…`, `/tickets…`), the background state refresher and the whole frontend (`TicketsPanel.tsx`, the task card's ticket chip) only see the neutral types (`Ticket`, `TicketRef`, `ProviderInfo`, `ConnectionStatus`). The connect form is rendered from `ProviderInfo.auth_fields`, so the UI never special-cases a provider.
+
+- **Adding a tracker** (Linear, Jira, GitLab, …): implement `TicketProvider` in a new `trackers/<name>.rs` and add one line to `TrackerRegistry::default_providers`. Nothing else changes. Test the generic pipeline against `trackers::fake::FakeProvider`, and the provider itself against a local axum mock (see `github.rs` tests).
+- **Read-only, explicit import.** Nothing is written to a tracker. A ticket becomes a task only via the panel's "Add" (→ To Do) or a drag onto a column. Import is idempotent per `(board, provider, key)`. `run_ticket_refresher` (every 10 min, `SESSIONBOARD_TICKET_REFRESH_SECS` to shorten) updates `TicketRef.state` for display only. It **never** moves a task's stage.
+- **Secrets live only in the OS keychain** (`KeychainCredentials`, service `taisk`, account `<provider>:<field>`), never in `trackers.json`, which only maps board → linked containers. `SESSIONBOARD_EPHEMERAL_CREDENTIALS=1` swaps in an in-memory store (the e2e harness sets it). On Linux containers keyutils may refuse writes, which is expected; the app targets macOS Keychain.
+- **GitHub auth:** a token pasted into taisk wins; otherwise `gh auth token` is reused (common install paths are tried explicitly because a Finder-launched app has a minimal PATH). List requests use ETags, so re-listing unchanged repos costs nothing against the rate limit. `SESSIONBOARD_GITHUB_API` points the provider at a fake GitHub for e2e.
+- **First session of a ticket task** starts `claude` with `session_prompt(ticket)` (key, title and URL) as its initial prompt. Later sessions on the same task start blank.
+
 ### Frontend (Kanban) gotchas
 
 - **Drag state is published one tick after `dragstart`** (`boardActions.beginDrag`). Mutating the DOM inside the `dragstart` handler can make Chrome abort the drag; handlers read the synchronous `getDrag()` instead of the store copy, which only drives visuals.

@@ -1,4 +1,15 @@
-import type { Board, SearchResult, SessionView, Stage, Task, TasksSnapshot } from "./types";
+import type {
+  Board,
+  ConnectionStatus,
+  SearchResult,
+  SessionView,
+  Stage,
+  Task,
+  TasksSnapshot,
+  TicketsResponse,
+  TrackerInfo,
+  TrackerLink,
+} from "./types";
 
 // Matches src-tauri/src/lib.rs's API_PORT constant — the desktop app's own
 // Core Engine instance. A future Phase-3 VS Code extension would need real
@@ -123,6 +134,59 @@ export async function renameBoard(id: string, name: string): Promise<Board> {
 
 export async function deleteBoard(id: string): Promise<void> {
   await boardRequest(`${API_BASE}/boards/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// ---- Ticket trackers (provider-neutral: GitHub today, others later) ----
+
+const q = (board: string) => `board=${encodeURIComponent(board)}`;
+const jsonInit = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+export async function getTrackers(): Promise<TrackerInfo[]> {
+  const resp = await boardRequest(`${API_BASE}/trackers`, {});
+  return resp.json();
+}
+
+/** Validated against the real service before anything is stored (keychain only). */
+export async function connectTracker(provider: string, fields: Record<string, string>): Promise<ConnectionStatus> {
+  const resp = await boardRequest(`${API_BASE}/trackers/${encodeURIComponent(provider)}/connection`, jsonInit("PUT", { fields }));
+  return resp.json();
+}
+
+/** Returns the status afterwards — still connected if credentials come from elsewhere (e.g. the gh CLI). */
+export async function disconnectTracker(provider: string): Promise<ConnectionStatus> {
+  const resp = await boardRequest(`${API_BASE}/trackers/${encodeURIComponent(provider)}/connection`, { method: "DELETE" });
+  return resp.json();
+}
+
+export async function getTrackerLinks(board: string): Promise<TrackerLink[]> {
+  const resp = await boardRequest(`${API_BASE}/trackers/links?${q(board)}`, {});
+  return resp.json();
+}
+
+/** Replaces the board's links; containers come back canonicalized (a pasted URL → owner/repo). */
+export async function setTrackerLinks(board: string, links: TrackerLink[]): Promise<TrackerLink[]> {
+  const resp = await boardRequest(`${API_BASE}/trackers/links?${q(board)}`, jsonInit("PUT", { links }));
+  return resp.json();
+}
+
+export async function getTrackerSuggestions(provider: string, board: string): Promise<string[]> {
+  const resp = await boardRequest(`${API_BASE}/trackers/${encodeURIComponent(provider)}/suggestions?${q(board)}`, {});
+  return resp.json();
+}
+
+export async function getTickets(board: string): Promise<TicketsResponse> {
+  const resp = await boardRequest(`${API_BASE}/tickets?${q(board)}`, {});
+  return resp.json();
+}
+
+/** Ticket → task (idempotent: a ticket already on the board returns its task). */
+export async function importTicket(provider: string, key: string, board: string, stage: Stage): Promise<Task> {
+  const resp = await boardRequest(`${API_BASE}/tickets/import`, jsonInit("POST", { provider, key, board, stage }));
+  return resp.json();
 }
 
 /** A pty is a real `claude` process kept alive by the backend (see terminal.rs). */

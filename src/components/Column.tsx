@@ -3,7 +3,7 @@ import { createTask } from "../api";
 import { useSessionStore } from "../store/sessionStore";
 import { WIP_LIMIT, sessionsOfTask } from "../store/selectors";
 import type { SessionView, Stage, Task } from "../types";
-import { endDrag, getDrag, moveTask } from "./boardActions";
+import { dropTicket, endDrag, getDrag, moveTask } from "./boardActions";
 import { TaskCard } from "./TaskCard";
 import styles from "./Kanban.module.css";
 
@@ -24,7 +24,7 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState("");
 
-  const hot = drag.kind === "task" && overCol === stage;
+  const hot = (drag.kind === "task" || drag.kind === "ticket") && overCol === stage;
   const overLimit = stage === "inprogress" && tasks.length > WIP_LIMIT;
 
   const cancel = () => {
@@ -62,7 +62,8 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
         className={`${styles.columnBody} ${hot ? styles.columnHot : ""}`}
         data-testid={`column-body-${stage}`}
         onDragOver={(e) => {
-          if (getDrag().kind !== "task") return;
+          const kind = getDrag().kind;
+          if (kind !== "task" && kind !== "ticket") return;
           e.preventDefault();
           if (overCol !== stage) setOver({ col: stage });
         }}
@@ -71,6 +72,12 @@ export function Column({ stage, label, accent, tasks, sessions, assignments }: P
         }}
         onDrop={(e) => {
           const d = getDrag();
+          if (d.kind === "ticket" && d.ticket) {
+            e.preventDefault();
+            dropTicket(d.ticket, stage);
+            endDrag();
+            return;
+          }
           if (d.kind !== "task" || !d.taskId) return;
           e.preventDefault();
           moveTask(d.taskId, stage);

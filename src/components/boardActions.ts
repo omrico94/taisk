@@ -1,4 +1,4 @@
-import { assignSession, updateTask } from "../api";
+import { assignSession, importTicket, updateTask } from "../api";
 import { ORPHAN } from "../store/selectors";
 import { NO_DRAG, useSessionStore, type DragState } from "../store/sessionStore";
 import type { Stage } from "../types";
@@ -18,6 +18,12 @@ export function moveTask(taskId: string, stage: Stage): void {
   const task = useSessionStore.getState().tasks.find((t) => t.id === taskId);
   if (!task || task.stage === stage) return;
   void updateTask(taskId, { stage });
+}
+
+/** Ticket → task in `stage` (the backend dedups a ticket already on the board). */
+export function dropTicket(ticket: { provider: string; key: string }, stage: Stage): void {
+  const { activeBoardId } = useSessionStore.getState();
+  importTicket(ticket.provider, ticket.key, activeBoardId, stage).catch((err) => console.error("Failed to import ticket:", err));
 }
 
 // The drag in flight, readable synchronously by drag handlers. The store copy

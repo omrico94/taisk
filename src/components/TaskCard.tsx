@@ -1,8 +1,9 @@
 import { deleteTask } from "../api";
+import { openExternal } from "../openExternal";
 import { useSessionStore } from "../store/sessionStore";
 import { taskMeta, taskRollup } from "../store/selectors";
 import { fmtCost, fmtTokens, toolColorVar } from "../styles/sessionStyle";
-import type { SessionView, Task } from "../types";
+import type { SessionView, Task, TicketRef } from "../types";
 import { beginDrag, endDrag, getDrag, moveSession } from "./boardActions";
 import { SessionRow } from "./SessionRow";
 import styles from "./Kanban.module.css";
@@ -10,6 +11,27 @@ import styles from "./Kanban.module.css";
 interface Props {
   task: Task;
   sessions: SessionView[];
+}
+
+/** The ticket a task was imported from. Provider-neutral: the name comes from `GET /trackers`. */
+function TicketChip({ ticket }: { ticket: TicketRef }) {
+  const providerName = useSessionStore((s) => s.trackers.find((t) => t.id === ticket.provider)?.name ?? ticket.provider);
+  return (
+    <div className={styles.ticketRow}>
+      <button
+        className={styles.ticketChip}
+        data-testid="task-ticket"
+        title={`Open in ${providerName}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          openExternal(ticket.url);
+        }}
+      >
+        {providerName} · {ticket.key}
+      </button>
+      {ticket.state === "closed" && <span className={styles.ticketClosed}>closed</span>}
+    </div>
+  );
 }
 
 export function TaskCard({ task, sessions }: Props) {
@@ -111,6 +133,7 @@ export function TaskCard({ task, sessions }: Props) {
         </button>
       </div>
       <div className={styles.taskTitle}>{task.title}</div>
+      {task.ticket && <TicketChip ticket={task.ticket} />}
 
       {roll.total > 0 ? (
         <>

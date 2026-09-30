@@ -197,6 +197,33 @@
   text-wrap: pretty;
   overflow-wrap: anywhere;
 }
+
+/* Tracker ticket a task was imported from */
+.ticketRow { display: flex; align-items: center; gap: 6px; margin-top: 6px; min-width: 0; }
+.ticketChip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: var(--tk-r-chip);
+  background: transparent;
+  border: 1px solid var(--tk-line-hi);
+  color: var(--tk-text-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.ticketChip:hover { border-color: var(--tk-lime-edge); color: var(--tk-lime); }
+.ticketClosed {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: var(--tk-r-pill);
+  background: var(--tk-line);
+  color: var(--tk-done);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
 .rollRow { display: flex; align-items: center; gap: 9px; }
 .rollTrack { flex: 1; height: 4px; border-radius: 3px; background: var(--tk-line); overflow: hidden; }
 .rollFill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
