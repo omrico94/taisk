@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-taisk is a local-first Tauri (Rust) + React/TypeScript desktop app. It watches every running Claude Code session on the machine (CLI and Desktop), turns each into a live session that the user files under Kanban tasks (Backlog / To Do / In Progress / Done), drives that session's state from Claude Code's own hooks, and backs semantic search over session history with an embedded LanceDB vector store. All inference (session titles/summaries, embeddings) runs through a local Ollama instance — no cloud calls, no accounts, no API keys anywhere in this codebase.
+taisk is a local-first Tauri (Rust) + React/TypeScript desktop app. It watches every running Claude Code session on the machine (CLI and Desktop), turns each into a live session that the user files under Kanban tasks (Backlog / To Do / In Progress / Done), drives that session's state from Claude Code's own hooks, and backs semantic search over session history with an embedded LanceDB vector store. Inference (session titles/summaries, embeddings) runs through a local Ollama instance when one is ready, and otherwise falls back to **Claude-native** mode (Claude Code's own transcript data + keyword search, see "Inference backends" below) — no cloud calls, no accounts, no API keys anywhere in this codebase.
 
 There's a project-scoped setup skill at `.claude/skills/install-sessionboard/` — use it (or read it) before assuming a dependency is missing.
 
@@ -96,7 +96,17 @@ If a session still doesn't show up, check `~/.claude/projects/<sanitized-cwd>/<s
 
 ### Summary step (was "categorization")
 
-`summarize.rs`'s `summarize_session()` embeds the prompt (`nomic-embed-text`) for search and makes one `qwen2.5:1.5b` call for a stable session `title` + initial `task_summary`; an unparseable response falls back to the prompt's first words. There are no categories any more — grouping is the user's job, done with tasks.
+`summarize.rs`'s `summarize_session()` embeds the prompt (`nomic-embed-text`) for search and makes one `qwen2.5:1.5b` call for a stable session `title` + initial `task_summary`; an unparseable response falls back to the prompt's first words. There are no categories any more — grouping is the user's job, done with tasks. It **always** writes the `memories` row, even when Ollama fails (zero vector) — that row is what reconstruction rebuilds the board from, and skipping it (the old `embed(...)?` early return) left cards on "Starting…" forever and dropped them on restart.
+
+### Inference backends: Ollama or Claude-native
+
+`summarize::InferenceBackend` is picked once at startup (`bootstrap::start`): `TAISK_INFERENCE=ollama|native` forces it, otherwise `Ollama` only if `first_run::check_ollama_readiness` says `Ready`, else `Native`. `GET /inference` reports it (Toolbar caption). In `Native` mode no model is ever called:
+
+- **Title**: Claude Code writes its own into the transcript — `{"type":"ai-title","aiTitle":…}` (appears after the first turn, may be rewritten; latest wins), `{"type":"custom-title","customTitle":…}` from `/rename`, `{"type":"summary","summary":…}` on compaction (`collector::extract_native_title`, precedence custom > ai > summary). Session-start usually uses the prompt's first words; the `stop` handler's `refresh_native_title` upgrades it and updates the durable row (`MemoryRepo::set_title`) so restarts keep it. A `/rename` overrides the title in Ollama mode too.
+- **Task line**: `{"type":"last-prompt","lastPrompt":…}`, else the latest turn's text, squeezed by `collector::short_line`. Also the fallback when an Ollama call fails.
+- **Search**: `MemoryRepo::keyword_search` (word overlap over prompt/title/project, `distance = 1 - score` so the overlay's badge works). In Ollama mode, rows with an all-zero vector (written while Ollama was unavailable) are merged in via keyword search, and a failed query embed falls back to keyword search instead of returning `[]`.
+
+These transcript keys were confirmed against a real transcript; read them with `read_lines_from_start`, never the shared tail checkpoint.
 
 ### Tasks (the Kanban board)
 

@@ -21,10 +21,10 @@ use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 
 use crate::boards::{Board, BoardStore, DEFAULT_BOARD_ID};
-use crate::summarize::SummarizeConfig;
+use crate::summarize::{InferenceBackend, SummarizeConfig};
 use crate::collector::{parse_transcript_for_display, transcript_path, TranscriptRow};
 use crate::engine::{EngineCommand, EngineHandle, SessionView};
-use crate::memory_repo::{MemoryRepo, PurgeScope};
+use crate::memory_repo::{Memory, MemoryRepo, PurgeScope, ScoredMemory};
 use crate::ollama::OllamaClient;
 use crate::orchestrator::{DismissedSessions, WaitingSessions};
 use crate::tasks::{Column, ColumnPatch, RolesPatch, Stage, Task, TaskError, TaskHub, TasksSnapshot};
@@ -87,6 +87,7 @@ pub fn router(state: AppState) -> Router {
         .route("/terminals/{pty_id}", get(get_terminal_info))
         .route("/terminals/{pty_id}/ws", get(ws_terminal))
         .route("/search", get(search))
+        .route("/inference", get(get_inference))
         .route("/memories", delete(purge_memories))
         // Frontend (Tauri webview / Vite dev server) and this API are
         // different origins (different ports), so browser fetch() calls
@@ -724,15 +725,37 @@ struct SearchResult {
 /// silently hiding anything below a guessed-at bar — is the fix: a
 /// low-relevance result the user can *see* is low-relevance is more useful
 /// than an empty list.
+///
+/// Claude-native mode (no Ollama) — or Ollama failing to embed the query —
+/// uses `MemoryRepo::keyword_search` instead. Rows written without Ollama
+/// carry an all-zero vector that vector search can't rank, so in Ollama mode
+/// their keyword matches are merged in behind the vector results.
 async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> Json<Vec<SearchResult>> {
-    let Ok(embedding) = state.ollama.embed(&state.config.embedding_model, &q.q).await else {
-        return Json(vec![]);
-    };
     let live_ids: HashSet<String> = state.engine.snapshot().await.into_iter().map(|s| s.id).collect();
     // Over-fetch when filtering by board so a board with few matches isn't
     // starved by other boards' rows in the global top-N.
     let fetch = if q.board.is_some() { 50 } else { 10 };
-    let results = state.repo.search(&embedding, fetch).await.unwrap_or_default();
+    let embedding = match state.config.backend {
+        InferenceBackend::Ollama => state.ollama.embed(&state.config.embedding_model, &q.q).await.ok(),
+        InferenceBackend::Native => None,
+    };
+    let keyword = state.repo.keyword_search(&q.q, fetch).await.unwrap_or_default();
+    let results = match embedding {
+        None => keyword,
+        Some(embedding) => {
+            let is_unembedded = |m: &Memory| m.embedding.iter().all(|v| *v == 0.0);
+            let mut results: Vec<ScoredMemory> = state
+                .repo
+                .search(&embedding, fetch)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| !is_unembedded(&r.memory) && r.distance.is_finite())
+                .collect();
+            results.extend(keyword.into_iter().filter(|r| is_unembedded(&r.memory)));
+            results
+        }
+    };
     Json(
         results
             .into_iter()
@@ -749,6 +772,12 @@ async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> 
             })
             .collect(),
     )
+}
+
+/// Which backend produces titles/summaries/search — lets the UI say
+/// "Ollama" vs "Claude-native" instead of assuming Ollama is installed.
+async fn get_inference(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "backend": state.config.backend.as_str() }))
 }
 
 #[derive(Deserialize)]
@@ -783,6 +812,10 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     async fn spawn_test_server() -> (String, AppState) {
+        spawn_test_server_with(Arc::new(FakeOllamaClient::new("Backend / API")), SummarizeConfig::default()).await
+    }
+
+    async fn spawn_test_server_with(ollama: Arc<dyn OllamaClient>, config: SummarizeConfig) -> (String, AppState) {
         let lance_dir = tempfile::tempdir().unwrap();
         let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
         let claude_dir = tempfile::tempdir().unwrap();
@@ -800,8 +833,8 @@ mod tests {
         let state = AppState {
             engine: EngineHandle::spawn(),
             repo: Arc::new(repo),
-            ollama: Arc::new(FakeOllamaClient::new("Backend / API")),
-            config: Arc::new(SummarizeConfig::default()),
+            ollama,
+            config: Arc::new(config),
             claude_projects_dir,
             boards: Arc::new(BoardStore::in_memory()),
             hook_bridge_path: None,
@@ -1271,6 +1304,67 @@ mod tests {
             state.dismissed_sessions.lock().await.contains("s1"),
             "deleting must durably mark the session dismissed so it doesn't reappear on restart"
         );
+    }
+
+    fn unembedded_memory(session_id: &str, text: &str, title: &str) -> Memory {
+        Memory {
+            id: format!("{session_id}-prompt"),
+            session_id: session_id.into(),
+            kind: MemoryKind::Prompt,
+            text: text.into(),
+            embedding: vec![0.0; crate::memory_repo::EMBEDDING_DIM as usize],
+            project: "api-gateway".into(),
+            cwd: "/x".into(),
+            tool: "Claude Code".into(),
+            title: title.into(),
+            created_at: 0,
+        }
+    }
+
+    async fn search_for(base: &str, q: &str) -> Vec<SearchResult> {
+        reqwest::Client::new().get(format!("{base}/search?q={q}")).send().await.unwrap().json().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_backend_searches_by_keyword() {
+        let config = SummarizeConfig { backend: InferenceBackend::Native, ..SummarizeConfig::default() };
+        let (base, state) = spawn_test_server_with(Arc::new(crate::ollama::fake::FailingOllamaClient), config).await;
+        state.repo.upsert_memory(&unembedded_memory("s1", "tune the LR schedule", "LR schedule tuning")).await.unwrap();
+        state.repo.upsert_memory(&unembedded_memory("s2", "refactor auth middleware to async", "Auth refactor")).await.unwrap();
+        state.repo.upsert_memory(&unembedded_memory("s3", "fix the auth login bug", "Login fix")).await.unwrap();
+
+        let results = search_for(&base, "auth middleware").await;
+        assert_eq!(results.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(), vec!["s2", "s3"]);
+        assert!(results[0].distance < results[1].distance);
+        assert!((0.0..=1.0).contains(&results[1].distance));
+
+        let inference: serde_json::Value = reqwest::get(format!("{base}/inference")).await.unwrap().json().await.unwrap();
+        assert_eq!(inference["backend"], "native");
+    }
+
+    /// Ollama configured but not answering: search used to return `[]`.
+    #[tokio::test]
+    async fn ollama_backend_falls_back_to_keyword_search_when_embed_fails() {
+        let (base, state) = spawn_test_server_with(Arc::new(crate::ollama::fake::FailingOllamaClient), SummarizeConfig::default()).await;
+        state.repo.upsert_memory(&unembedded_memory("s1", "tune the LR schedule", "LR schedule tuning")).await.unwrap();
+        let results = search_for(&base, "schedule").await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, "s1");
+    }
+
+    /// Rows written while running without Ollama have zero vectors; once
+    /// Ollama is available they must still be findable, via keywords.
+    #[tokio::test]
+    async fn ollama_backend_still_finds_rows_written_without_ollama() {
+        let (base, state) = spawn_test_server().await;
+        let embedding = state.ollama.embed("nomic-embed-text", "refactor auth middleware").await.unwrap();
+        let mut embedded = unembedded_memory("s1", "refactor auth middleware", "Auth refactor");
+        embedded.embedding = embedding;
+        state.repo.upsert_memory(&embedded).await.unwrap();
+        state.repo.upsert_memory(&unembedded_memory("s2", "auth middleware tests", "Auth tests")).await.unwrap();
+
+        let results = search_for(&base, "auth middleware").await;
+        assert_eq!(results.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(), vec!["s1", "s2"]);
     }
 
     #[tokio::test]

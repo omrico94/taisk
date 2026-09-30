@@ -102,7 +102,7 @@ async fn start_core_engine(terminal: TerminalManager) -> Result<(), Box<dyn std:
         .map(|p| p.to_string_lossy().to_string());
 
     let ollama: Arc<dyn OllamaClient> = Arc::new(HttpOllamaClient::local());
-    let api_state = bootstrap::start(ollama, BootstrapOptions { hook_bridge_path, terminal }).await?;
+    let api_state = bootstrap::start(ollama, BootstrapOptions { hook_bridge_path, terminal, backend: None }).await?;
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", API_PORT)).await?;
     tauri::async_runtime::spawn(async move {

@@ -332,6 +332,54 @@ impl MemoryRepo {
         Ok(out)
     }
 
+    /// Search without embeddings — the Claude-native (no-Ollama) path, and
+    /// the fallback when an embed call fails. Scores every row by how many
+    /// query words appear in its prompt/title/project, with a bonus for the
+    /// whole query appearing verbatim; rows matching nothing are dropped.
+    /// `distance` is `1 - score` in [0, 1] so the overlay's existing
+    /// `1 - distance` relevance badge reads the same as for vector results.
+    /// A full scan is fine: there's one row per session.
+    pub async fn keyword_search(&self, query: &str, limit: usize) -> lancedb::Result<Vec<ScoredMemory>> {
+        let query = query.trim().to_lowercase();
+        let words: Vec<&str> = query.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<ScoredMemory> = self
+            .list_session_memories()
+            .await?
+            .into_iter()
+            .filter_map(|memory| {
+                let haystack = format!("{} {} {}", memory.title, memory.text, memory.project).to_lowercase();
+                let hits = words.iter().filter(|w| haystack.contains(*w)).count();
+                if hits == 0 {
+                    return None;
+                }
+                let phrase_bonus = if haystack.contains(&query) { 1.0 } else { 0.0 };
+                let score = (hits as f32 + phrase_bonus) / (words.len() as f32 + 1.0);
+                Some(ScoredMemory { memory, distance: 1.0 - score })
+            })
+            .collect();
+        out.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(b.memory.created_at.cmp(&a.memory.created_at)));
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    /// Updates just the durable title of a session's row, so a title learned
+    /// after the initial summary (Claude Code's own `ai-title`, a `/rename`)
+    /// survives a restart. A no-op if the session has no row yet.
+    pub async fn set_title(&self, session_id: &str, title: &str) -> lancedb::Result<()> {
+        let table = self.db.open_table(MEMORIES_TABLE).execute().await?;
+        let id = format!("{session_id}-prompt").replace('\'', "''");
+        let batches: Vec<RecordBatch> = table.query().only_if(format!("id = '{id}'")).execute().await?.try_collect().await?;
+        let Some(mut memory) = batches.iter().flat_map(rows_to_memories).next() else { return Ok(()) };
+        if memory.title == title {
+            return Ok(());
+        }
+        memory.title = title.to_string();
+        self.upsert_memory(&memory).await
+    }
+
     /// Every durable memory row (one per session, in practice — see
     /// `summarize_session`, which always upserts a single `{session_id}-prompt`
     /// row per session). Used on Core Engine restart to reconstruct which
