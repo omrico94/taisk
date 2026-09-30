@@ -1,19 +1,13 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { deleteColumn, setColumnRoles, updateColumn } from "../api";
+import { addColumn, deleteColumn, reorderColumns, updateColumn } from "../api";
 import { useSessionStore } from "../store/sessionStore";
 import { COLUMN_PALETTE } from "../store/selectors";
-import type { BoardColumns, Column, ColumnRole } from "../types";
+import type { BoardColumns, Column } from "../types";
 import { moveColumn } from "./boardActions";
 import styles from "./Kanban.module.css";
 
 const MENU_W = 250;
-
-const ROLES: { role: ColumnRole; label: string; hint: string }[] = [
-  { role: "done", label: "Finished column", hint: "Cards here are shown as done (dimmed)" },
-  { role: "active", label: "Highlighted column", hint: "Gets the bright accent, like In Progress" },
-  { role: "intake", label: "Quick-add column", hint: "⌥⌘N files new tasks here" },
-];
 
 interface Props {
   column: Column;
@@ -25,7 +19,7 @@ interface Props {
   onRename: () => void;
 }
 
-/** A column's ⋯ menu: rename, color, reorder, roles, delete.
+/** A column's ⋯ menu: rename, color, reorder, add a neighbor, delete.
  * `position: fixed` in a portal so it escapes the board's overflow clipping;
  * closes on any outside click or Escape (same pattern as `AssignMenu`). */
 export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRename }: Props) {
@@ -34,6 +28,8 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
   const index = layout.columns.findIndex((c) => c.id === column.id);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [moveTo, setMoveTo] = useState(others[Math.max(0, index - 1)]?.id ?? "");
+  const [addSide, setAddSide] = useState<"left" | "right" | null>(null);
+  const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -58,6 +54,25 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
     onClose();
   };
 
+  // New column is created (appended at the end by the backend), then moved
+  // next to this one — same two-step dance as a drag-reorder.
+  const commitAdd = () => {
+    const n = newName.trim();
+    if (!n) return setAddSide(null);
+    addColumn(board, n)
+      .then((created) => {
+        const ids = layout.columns.map((c) => c.id);
+        ids.splice(addSide === "left" ? index : index + 1, 0, created.id);
+        return reorderColumns(board, ids);
+      })
+      .then(() => {
+        setAddSide(null);
+        setNewName("");
+        onClose();
+      })
+      .catch((err: Error) => setError(err.message));
+  };
+
   const left = Math.max(8, Math.min(anchor.x - MENU_W, window.innerWidth - MENU_W - 8));
 
   return createPortal(
@@ -68,7 +83,34 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
       style={{ left, top: anchor.y, width: MENU_W }}
       onClick={(e) => e.stopPropagation()}
     >
-      {confirmDelete ? (
+      {addSide ? (
+        <>
+          <div className={styles.assignHeader}>
+            Add a column to the {addSide} of “{column.name}”
+          </div>
+          <div className={styles.addRow}>
+            <input
+              autoFocus
+              className={styles.addInput}
+              value={newName}
+              maxLength={40}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitAdd();
+                else if (e.key === "Escape") setAddSide(null);
+              }}
+              placeholder="Column name…"
+              aria-label="New column name"
+            />
+            <button className={styles.addCommit} onClick={commitAdd}>
+              Add
+            </button>
+            <button className={styles.addCancel} onClick={() => setAddSide(null)}>
+              Esc
+            </button>
+          </div>
+        </>
+      ) : confirmDelete ? (
         <>
           <div className={styles.assignHeader}>Delete “{column.name}”?</div>
           {taskCount > 0 && (
@@ -133,25 +175,14 @@ export function ColumnMenu({ column, layout, taskCount, anchor, onClose, onRenam
               Move right →
             </button>
           </div>
-
-          <div className={styles.menuDivider} />
-          {ROLES.map(({ role, label, hint }) => {
-            const on = layout[role] === column.id;
-            return (
-              <button
-                key={role}
-                role="menuitemcheckbox"
-                aria-checked={on}
-                className={styles.menuItem}
-                title={hint}
-                data-testid={`role-${role}`}
-                onClick={() => run(setColumnRoles(board, { [role]: on ? null : column.id }), false)}
-              >
-                <span className={styles.menuCheck}>{on ? "✓" : ""}</span>
-                {label}
-              </button>
-            );
-          })}
+          <div className={styles.menuRow}>
+            <button className={styles.menuItem} data-testid="add-left" onClick={() => setAddSide("left")}>
+              + Add left
+            </button>
+            <button className={styles.menuItem} data-testid="add-right" onClick={() => setAddSide("right")}>
+              + Add right
+            </button>
+          </div>
 
           <div className={styles.menuDivider} />
           <button
