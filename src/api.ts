@@ -37,20 +37,41 @@ export async function getTranscript(sessionId: string): Promise<TranscriptRow[]>
   return resp.json();
 }
 
-export async function approveSession(id: string): Promise<void> {
-  await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}/approve`, { method: "POST" });
+/** `true` on success. `false` means the backend couldn't actually deliver the
+ * decision into the session's real terminal (no known pty or tty — a Claude
+ * Desktop session, or one whose terminal window closed) — the board's own
+ * state is deliberately left untouched in that case rather than looking
+ * resolved while the real session never heard anything. */
+export async function approveSession(id: string): Promise<boolean> {
+  const resp = await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}/approve`, { method: "POST" });
+  return resp.ok;
 }
 
-export async function rejectSession(id: string): Promise<void> {
-  await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}/reject`, { method: "POST" });
+export async function rejectSession(id: string): Promise<boolean> {
+  const resp = await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}/reject`, { method: "POST" });
+  return resp.ok;
 }
 
-export async function replySession(id: string, text: string): Promise<void> {
-  await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}/reply`, {
+export async function replySession(id: string, text: string): Promise<boolean> {
+  const resp = await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}/reply`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
+  return resp.ok;
+}
+
+/** Answers a real `AskUserQuestion` wait: either `selected` option label(s)
+ * (single label for a single-select question, several for a multi-select
+ * one) or free `text` for the question's own "Type something." option. See
+ * `approveSession`'s doc comment for what a `false` result means. */
+export async function answerSession(id: string, body: { selected?: string[]; text?: string }): Promise<boolean> {
+  const resp = await fetch(`${API_BASE}/sessions/${encodeURIComponent(id)}/answer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return resp.ok;
 }
 
 export async function deleteSession(id: string): Promise<void> {

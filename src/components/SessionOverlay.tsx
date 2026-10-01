@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useSessionStore } from "../store/sessionStore";
 import type { SessionState } from "../types";
 import {
+  answerSession,
   approveSession,
   deleteSession,
   getTranscript,
@@ -53,6 +54,14 @@ export function SessionOverlay({ nowMs }: Props) {
   // `false` without ever prompting, so the delete button did nothing at
   // all). An in-UI two-click confirm needs no dialog support from the host.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Multi-select `AskUserQuestion` toggle state (labels currently checked) —
+  // only meaningful while `session.waiting_question?.multi_select` is true;
+  // a single-select question answers immediately on click instead.
+  const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
+  // Surfaces the "couldn't actually reach the session" case (no known pty or
+  // tty — see `api.ts`'s doc comments) instead of silently doing nothing,
+  // which is the bug this whole delivery path exists to fix.
+  const [deliveryError, setDeliveryError] = useState(false);
 
   // M10: real transcript fetch (replacing M8's MOCK_TRANSCRIPTS). Re-fetches
   // whenever the selected session changes — this is a point-in-time read,
@@ -77,6 +86,8 @@ export function SessionOverlay({ nowMs }: Props) {
   // carry over an armed delete state onto whatever's shown next.
   useEffect(() => {
     setConfirmingDelete(false);
+    setSelectedLabels([]);
+    setDeliveryError(false);
   }, [selectedId]);
 
   if (!session || !selectedId) return null;
@@ -89,18 +100,45 @@ export function SessionOverlay({ nowMs }: Props) {
   // These fire the real API calls (M10); the resulting state change comes
   // back authoritatively over the WS diff stream, not a local mutation —
   // the drawer only owns UI-only concerns (closing itself, clearing the
-  // reply box) here.
-  const approve = () => {
-    approveSession(session.id);
-    selectCard(null);
+  // reply box) here. Each one now actually delivers into the session's real
+  // terminal (see `api.ts`'s doc comments) — a `false` result means that
+  // failed (no known pty/tty), so the overlay stays open and shows why
+  // instead of closing on an action that silently did nothing.
+  const approve = async () => {
+    if (await approveSession(session.id)) selectCard(null);
+    else setDeliveryError(true);
   };
-  const reject = () => {
-    rejectSession(session.id);
-    selectCard(null);
+  const reject = async () => {
+    if (await rejectSession(session.id)) selectCard(null);
+    else setDeliveryError(true);
   };
-  const send = () => {
-    replySession(session.id, replyText.trim());
-    selectCard(null);
+  const send = async () => {
+    if (await replySession(session.id, replyText.trim())) selectCard(null);
+    else setDeliveryError(true);
+  };
+
+  // `AskUserQuestion` answering: a single-select question answers the moment
+  // an option is clicked (matching the real terminal's own immediate-select
+  // behavior); a multi-select one toggles checkboxes and waits for an
+  // explicit confirm, since more than one choice can be intended.
+  const question = session.waiting_question;
+  const toggleOption = (label: string) => {
+    setSelectedLabels((prev) => (prev.includes(label) ? prev.filter((l) => l !== label) : [...prev, label]));
+  };
+  const chooseOption = async (label: string) => {
+    if (await answerSession(session.id, { selected: [label] })) selectCard(null);
+    else setDeliveryError(true);
+  };
+  const confirmMultiSelect = async () => {
+    if (selectedLabels.length === 0) return;
+    if (await answerSession(session.id, { selected: selectedLabels })) selectCard(null);
+    else setDeliveryError(true);
+  };
+  const sendFreeTextAnswer = async () => {
+    const text = replyText.trim();
+    if (!text) return;
+    if (await answerSession(session.id, { text })) selectCard(null);
+    else setDeliveryError(true);
   };
 
   // Removes the card from the board entirely (durably, so it doesn't just
@@ -124,6 +162,12 @@ export function SessionOverlay({ nowMs }: Props) {
   // case gets an honest disabled button instead of a fallback gesture that
   // looks session-specific but isn't.
   const canJump = session.entrypoint === "cli";
+  // Same underlying limitation as `canJump`: delivering an answer means
+  // reaching the session's real terminal — an embedded pty the board opened
+  // itself, or (the common case) the bare tty of an external one (see
+  // `api.ts`'s doc comments) — neither of which exists for a Claude Desktop
+  // session.
+  const canAnswerFromBoard = session.entrypoint === "cli";
   const unassign = () => {
     moveSession(session.id, null);
     selectCard(null);
@@ -301,7 +345,66 @@ export function SessionOverlay({ nowMs }: Props) {
         </div>
       </div>
 
-      {isWaiting ? (
+      {isWaiting && !canAnswerFromBoard ? (
+        <div className={`${styles.footer} ${styles.waitingFooter}`}>
+          {question && <div className={styles.questionText}>{question.question}</div>}
+          <div className={styles.deliveryError}>
+            This session was started from Claude Desktop — there's no way to answer it from the board yet. Switch to
+            that window to respond.
+          </div>
+        </div>
+      ) : isWaiting && question ? (
+        <div className={`${styles.footer} ${styles.waitingFooter}`}>
+          <div className={styles.questionText}>{question.question}</div>
+          <div className={styles.optionList}>
+            {question.options.map((opt) => {
+              const checked = selectedLabels.includes(opt.label);
+              return (
+                <button
+                  key={opt.label}
+                  className={`${styles.optionButton} ${checked ? styles.optionButtonSelected : ""}`}
+                  onClick={() => (question.multi_select ? toggleOption(opt.label) : chooseOption(opt.label))}
+                >
+                  {question.multi_select && (
+                    <span className={`${styles.optionCheckbox} ${checked ? styles.optionCheckboxChecked : ""}`}>
+                      {checked ? "✓" : ""}
+                    </span>
+                  )}
+                  <span className={styles.optionText}>
+                    <span className={styles.optionLabel}>{opt.label}</span>
+                    {opt.description && <span className={styles.optionDesc}>{opt.description}</span>}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {question.multi_select && (
+            <button
+              className={styles.approveButton}
+              onClick={confirmMultiSelect}
+              disabled={selectedLabels.length === 0}
+            >
+              Confirm ({selectedLabels.length} selected)
+            </button>
+          )}
+          <textarea
+            className={styles.textarea}
+            value={replyText}
+            onChange={(e) => setReplyText(e.target.value)}
+            placeholder="Or type your own answer…"
+          />
+          <div className={styles.buttonRow}>
+            <button className={styles.sendButton} onClick={sendFreeTextAnswer}>
+              Send ↵
+            </button>
+          </div>
+          {deliveryError && (
+            <div className={styles.deliveryError}>
+              Couldn't reach the session automatically — answer it directly in the terminal.
+            </div>
+          )}
+        </div>
+      ) : isWaiting ? (
         <div className={`${styles.footer} ${styles.waitingFooter}`}>
           <textarea
             className={styles.textarea}
@@ -320,6 +423,11 @@ export function SessionOverlay({ nowMs }: Props) {
               Send ↵
             </button>
           </div>
+          {deliveryError && (
+            <div className={styles.deliveryError}>
+              Couldn't reach the session automatically — answer it directly in the terminal.
+            </div>
+          )}
         </div>
       ) : (
         <div className={styles.footer}>

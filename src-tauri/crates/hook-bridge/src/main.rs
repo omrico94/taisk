@@ -26,6 +26,23 @@ fn socket_path() -> PathBuf {
         .join("engine.sock")
 }
 
+/// The controlling terminal device (e.g. `/dev/ttys003`) this process is
+/// attached to, if any. See the call site below for why this matters.
+fn detect_tty() -> Option<String> {
+    for fd in [libc::STDERR_FILENO, libc::STDOUT_FILENO] {
+        let ptr = unsafe { libc::ttyname(fd) };
+        if ptr.is_null() {
+            continue;
+        }
+        if let Ok(name) = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str() {
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let event = args.get(1).cloned().unwrap_or_default();
@@ -62,6 +79,21 @@ fn main() {
     if let (Some(obj), Ok(pty_id)) = (payload.as_object_mut(), std::env::var("SESSIONBOARD_PTY_ID")) {
         if !pty_id.is_empty() {
             obj.insert("sessionboard_pty_id".into(), serde_json::Value::String(pty_id));
+        }
+    }
+
+    // The controlling terminal device (e.g. `/dev/ttys003`) this hook process
+    // inherited, if any — the only channel that exists for delivering an
+    // approve/reject/answer keypress into a session running in an ordinary
+    // external terminal (one with no embedded pty for `SESSIONBOARD_PTY_ID`
+    // to tag above). stdin here is the hook's JSON payload, never a tty, so
+    // it's not tried. Checked in order stderr, then stdout: Claude Code may
+    // capture a hook's stdout to read a synchronous decision for hooks that
+    // support one, in which case fd 1 is a pipe (`ttyname` fails, ENOTTY)
+    // even though the process is still attached to a real terminal via fd 2.
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(tty) = detect_tty() {
+            obj.insert("sessionboard_tty".into(), serde_json::Value::String(tty));
         }
     }
 

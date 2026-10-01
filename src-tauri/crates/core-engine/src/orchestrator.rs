@@ -21,7 +21,7 @@ use crate::collector::{
     project_name_from_cwd, read_lines_from_start, tail_new_lines, transcript_path, TailCheckpoints,
 };
 use crate::boards::{BoardStore, DEFAULT_BOARD_ID};
-use crate::engine::{EngineCommand, EngineHandle};
+use crate::engine::{EngineCommand, EngineHandle, WaitingOption, WaitingQuestion};
 use crate::hook_socket::{self, HookEvent};
 use crate::memory_repo::MemoryRepo;
 use crate::ollama::OllamaClient;
@@ -276,6 +276,33 @@ impl WaitingSessions {
     }
 }
 
+/// In-memory-only (never persisted) record of each session's controlling
+/// terminal device (e.g. `/dev/ttys003`), captured from `hook-bridge`'s
+/// `sessionboard_tty` payload field. This is the delivery fallback for a
+/// session running in an ordinary external terminal — one with no embedded
+/// pty for `TerminalManager` to know about (see `api::deliver_and_resolve`,
+/// which tries the embedded pty first and this second). Deliberately never
+/// durable, unlike `WaitingSessions`/`DismissedSessions`: a tty path from a
+/// previous run could belong to a completely different process by the next
+/// restart, and writing to the wrong process's terminal is far worse than
+/// just not being able to deliver at all.
+#[derive(Clone, Default)]
+pub struct SessionTtys(Arc<Mutex<std::collections::HashMap<String, String>>>);
+
+impl SessionTtys {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn record(&self, session_id: &str, tty: &str) {
+        self.0.lock().await.insert(session_id.to_string(), tty.to_string());
+    }
+
+    pub async fn get(&self, session_id: &str) -> Option<String> {
+        self.0.lock().await.get(session_id).cloned()
+    }
+}
+
 /// Durable record of session ids explicitly deleted from the board (the
 /// "Delete" action in the drawer). Same flat-file pattern as `EndedSessions`/
 /// `WaitingSessions`, for the same underlying reason: a `memories` row and a
@@ -388,6 +415,7 @@ async fn reconstruct_live_sessions(
                 // approximates live `state` on restart.
                 entrypoint: None,
                 started_at_ms: Some(memory.created_at),
+                waiting_question: None,
             })
             .await;
         // `SessionEvent` above just stamped `last_activity_ms` with "now" —
@@ -411,6 +439,7 @@ async fn reconstruct_live_sessions(
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
         } else if waiting_sessions.contains(&memory.session_id) {
@@ -425,6 +454,7 @@ async fn reconstruct_live_sessions(
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
         } else if age >= orch_config.idle_ttl {
@@ -442,6 +472,7 @@ async fn reconstruct_live_sessions(
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
             if age >= orch_config.idle_ttl + orch_config.done_ttl {
@@ -458,6 +489,7 @@ async fn reconstruct_live_sessions(
                         cwd: None,
                         entrypoint: None,
                         started_at_ms: None,
+                        waiting_question: None,
                     })
                     .await;
             }
@@ -541,6 +573,7 @@ async fn done_sweep_once(engine: &EngineHandle, ended_sessions: &Mutex<EndedSess
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
         }
@@ -561,6 +594,7 @@ pub async fn run(
     dismissed_sessions: Arc<Mutex<DismissedSessions>>,
     tasks: TaskHub,
     terminal: TerminalManager,
+    session_ttys: SessionTtys,
 ) {
     // Bind the hook socket and start accepting connections *before* the
     // reconstruction below. `bootstrap::start` has already registered our
@@ -615,6 +649,18 @@ pub async fn run(
                 terminal.link_session(pid, sid);
             }
         }
+        // Record this session's real tty on every hook that carries one, not
+        // just `session-start` — cheap, and self-corrects if a particular
+        // hook invocation didn't have one (e.g. stdout captured for a
+        // synchronous decision — see `hook-bridge`'s `detect_tty` doc
+        // comment). This is the fallback delivery channel for a session in
+        // an ordinary external terminal (see `SessionTtys`'s doc comment).
+        if let (Some(sid), Some(tty)) = (
+            event.payload.get("session_id").and_then(|v| v.as_str()),
+            event.payload.get("sessionboard_tty").and_then(|v| v.as_str()),
+        ) {
+            session_ttys.record(sid, tty).await;
+        }
         let engine = engine.clone();
         let repo = repo.clone();
         let ollama = ollama.clone();
@@ -655,6 +701,34 @@ async fn assign_when_visible(engine: EngineHandle, tasks: TaskHub, session_id: S
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
+}
+
+/// Parses a real `AskUserQuestion` `tool_input` (`{"questions": [{"question",
+/// "header", "multiSelect", "options": [{"label", "description"}, ...]}]}`)
+/// into the `WaitingQuestion` the board needs to render the actual question
+/// instead of a generic Approve/Reject footer, and to later select the right
+/// option when answering it (`api::answer`). Only the first question is
+/// captured when a call asks several at once — see `WaitingQuestion`'s doc
+/// comment for why. Returns `None` for anything that doesn't match this
+/// shape (a malformed/future payload) rather than a half-populated question —
+/// the caller falls back to the generic footer in that case, same as a plain
+/// permission-prompt wait.
+fn parse_ask_user_question(tool_input: &serde_json::Value) -> Option<WaitingQuestion> {
+    let q = tool_input.get("questions")?.as_array()?.first()?;
+    let question = q.get("question")?.as_str()?.to_string();
+    let header = q.get("header").and_then(|v| v.as_str()).map(str::to_string);
+    let multi_select = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
+    let options = q
+        .get("options")?
+        .as_array()?
+        .iter()
+        .filter_map(|o| {
+            let label = o.get("label")?.as_str()?.to_string();
+            let description = o.get("description").and_then(|v| v.as_str()).map(str::to_string);
+            Some(WaitingOption { label, description })
+        })
+        .collect();
+    Some(WaitingQuestion { question, header, multi_select, options })
 }
 
 async fn handle_hook_event(
@@ -826,6 +900,7 @@ async fn handle_hook_event(
                     cwd: Some(cwd.clone()),
                     entrypoint,
                     started_at_ms: Some(crate::now_ms()),
+                    waiting_question: None,
                 })
                 .await;
 
@@ -849,6 +924,7 @@ async fn handle_hook_event(
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
         }
@@ -862,6 +938,7 @@ async fn handle_hook_event(
         "pre-tool-use"
             if event.payload.get("tool_name").and_then(|v| v.as_str()) == Some("AskUserQuestion") =>
         {
+            let waiting_question = event.payload.get("tool_input").and_then(parse_ask_user_question);
             engine
                 .dispatch(EngineCommand::SessionEvent {
                     id: session_id,
@@ -870,6 +947,7 @@ async fn handle_hook_event(
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question,
                 })
                 .await;
         }
@@ -885,6 +963,7 @@ async fn handle_hook_event(
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
         }
@@ -897,6 +976,7 @@ async fn handle_hook_event(
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
         }
@@ -919,6 +999,7 @@ async fn handle_hook_event(
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
 
@@ -996,6 +1077,7 @@ async fn handle_hook_event(
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
 
@@ -1681,7 +1763,7 @@ mod tests {
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new()));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new(), SessionTtys::new()));
         // Give the orchestrator a moment to bind the UDS before the fake
         // hook-bridge client below tries to connect to it.
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1791,6 +1873,7 @@ mod tests {
             dismissed_sessions,
             tasks.clone(),
             TerminalManager::new(),
+            SessionTtys::new(),
         ));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -1877,6 +1960,7 @@ mod tests {
             dismissed_sessions,
             tasks,
             terminal.clone(),
+            SessionTtys::new(),
         ));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -1902,6 +1986,79 @@ mod tests {
         terminal.kill_all();
     }
 
+    /// A `claude` running in an ordinary external terminal (no embedded pty)
+    /// carries its tty via hook-bridge's `sessionboard_tty` (see
+    /// `tty_input.rs` for why this is the only channel that can then deliver
+    /// an approve/reject/answer into it) — the `run()` loop must record it
+    /// against the session id so `api::deliver_and_resolve` can find it.
+    #[tokio::test]
+    async fn session_start_tagged_with_a_tty_records_it() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let cwd = "/Users/omricohen/api-gateway";
+        let session_id = "orch-tty-1";
+        let path = transcript_path(claude_dir.path(), cwd, session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({"type":"user","message":{"role":"user","content":"hi"}}).to_string() + "\n",
+        )
+        .unwrap();
+
+        let engine = EngineHandle::spawn();
+        let repo = Arc::new(MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap());
+        let ollama: Arc<dyn OllamaClient> = Arc::new(FakeOllamaClient::new_summarizing("Hi"));
+        let cat_config = Arc::new(SummarizeConfig::default());
+        let socket_path = app_dir.path().join("engine.sock");
+        let orch_config = Arc::new(OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
+            socket_path: socket_path.clone(),
+            transcript_wait: Duration::from_millis(500),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            ..OrchestratorConfig::default()
+        });
+        let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+        let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
+        let session_ttys = SessionTtys::new();
+
+        tokio::spawn(run(
+            engine.clone(),
+            repo.clone(),
+            ollama,
+            cat_config,
+            orch_config,
+            waiting_sessions,
+            dismissed_sessions,
+            tasks,
+            TerminalManager::new(),
+            session_ttys.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let mut payload = real_session_start_payload(session_id, cwd, &path, "startup");
+        payload["sessionboard_tty"] = serde_json::json!("/dev/ttys009");
+        let envelope = serde_json::json!({ "event": "session-start", "payload": payload });
+        tokio::task::spawn_blocking(move || {
+            let mut stream = StdUnixStream::connect(&socket_path).unwrap();
+            stream.write_all(envelope.to_string().as_bytes()).unwrap();
+        })
+        .await
+        .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if session_ttys.get(session_id).await.as_deref() == Some("/dev/ttys009") {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "tty should have been recorded in time");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// Regression (user report — a real "best pet for you" AskUserQuestion
     /// session sat at Working instead of flipping to Waiting): Claude Code
     /// doesn't fire a `Notification` hook for `AskUserQuestion` even though
@@ -1923,6 +2080,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
 
@@ -1964,6 +2122,85 @@ mod tests {
         );
     }
 
+    /// User report (screenshot of a live "Peek an animal from a list"
+    /// `AskUserQuestion` prompt): the drawer showed a generic Approve/Reject
+    /// footer instead of the real question, and neither button actually
+    /// reached the session. This test covers the capture half of the fix:
+    /// the real question/options from `tool_input` must land on the
+    /// session's `waiting_question`, and must be cleared once the wait
+    /// resolves — it no longer describes what the session is doing.
+    #[tokio::test]
+    async fn ask_user_question_captures_the_real_question_and_options() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let engine = EngineHandle::spawn();
+        engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "s1".into(),
+                event: SessionEvent::SessionStart,
+                project: None,
+                cwd: None,
+                entrypoint: None,
+                started_at_ms: Some(0),
+                waiting_question: None,
+            })
+            .await;
+
+        let repo = MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap();
+        let ollama = FakeOllamaClient::new_summarizing("n/a");
+        let cat_config = SummarizeConfig::default();
+        let orch_config = OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
+            ended_sessions_path: app_dir.path().join("ended-sessions.json"),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            ..OrchestratorConfig::default()
+        };
+        let checkpoints = Arc::new(Mutex::new(TailCheckpoints::load(&orch_config.checkpoint_path)));
+        let ended_sessions = Arc::new(Mutex::new(EndedSessions::load(&orch_config.ended_sessions_path)));
+        let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+
+        let payload = serde_json::json!({
+            "session_id": "s1",
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "toolu_1",
+            "tool_input": {
+                "questions": [{
+                    "question": "Which animal do you pick?",
+                    "header": "Animal",
+                    "multiSelect": false,
+                    "options": [
+                        {"label": "Dog", "description": "Loyal and friendly"},
+                        {"label": "Cat", "description": "Independent and curious"},
+                    ],
+                }],
+            },
+        });
+        let event = HookEvent { event: "pre-tool-use".into(), payload };
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
+            .await;
+
+        let snapshot = engine.snapshot().await;
+        assert_eq!(snapshot[0].state, crate::state::SessionState::Waiting);
+        let question = snapshot[0].waiting_question.clone().expect("question must be captured");
+        assert_eq!(question.question, "Which animal do you pick?");
+        assert_eq!(question.header.as_deref(), Some("Animal"));
+        assert!(!question.multi_select);
+        assert_eq!(question.options.len(), 2);
+        assert_eq!(question.options[0].label, "Dog");
+        assert_eq!(question.options[0].description.as_deref(), Some("Loyal and friendly"));
+
+        // Resolving the wait (a later real hook, same as any other activity)
+        // must clear the captured question.
+        let event = HookEvent { event: "pre-tool-use".into(), payload: real_pre_tool_use_payload("s1", "Bash", "toolu_2") };
+        handle_hook_event(event, &engine, &repo, &ollama, &cat_config, &orch_config, &checkpoints, &ended_sessions, &waiting_sessions, &dismissed_sessions)
+            .await;
+        assert!(engine.snapshot().await[0].waiting_question.is_none());
+    }
+
     /// Regression (user report, with a screenshot of a real "Allow Claude to
     /// run?" Bash approval dialog: the card stayed on Working the entire
     /// time): `Notification`'s `permission_prompt` type is gated behind ~6s
@@ -1987,6 +2224,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
 
@@ -2063,6 +2301,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
         engine
@@ -2073,6 +2312,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Done);
@@ -2129,6 +2369,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
         engine
@@ -2139,6 +2380,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         assert_eq!(engine.snapshot().await[0].state, crate::state::SessionState::Done);
@@ -2189,6 +2431,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
 
@@ -2238,6 +2481,7 @@ mod tests {
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: Some(0),
+                    waiting_question: None,
                 })
                 .await;
             engine
@@ -2248,6 +2492,7 @@ mod tests {
                     cwd: None,
                     entrypoint: None,
                     started_at_ms: None,
+                    waiting_question: None,
                 })
                 .await;
         }
@@ -2286,6 +2531,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
 
@@ -2390,7 +2636,7 @@ mod tests {
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new()));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new(), SessionTtys::new()));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let missing_path = transcript_path(claude_dir.path(), "/Users/omricohen", session_id);
@@ -2511,7 +2757,7 @@ mod tests {
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new()));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new(), SessionTtys::new()));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let refresh_prompt = format!(
@@ -2609,7 +2855,7 @@ mod tests {
         let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
 
         let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
-        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new()));
+        tokio::spawn(run(engine.clone(), repo.clone(), ollama, cat_config, orch_config, waiting_sessions, dismissed_sessions, tasks, TerminalManager::new(), SessionTtys::new()));
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let send = |event: &str| {

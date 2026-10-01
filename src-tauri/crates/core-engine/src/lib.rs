@@ -17,6 +17,7 @@ pub mod state;
 pub mod summarize;
 pub mod tasks;
 pub mod terminal;
+pub mod tty_input;
 pub mod trackers;
 
 pub(crate) fn now_ms() -> i64 {

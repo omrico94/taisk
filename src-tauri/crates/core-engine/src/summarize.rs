@@ -292,6 +292,7 @@ mod fixture_harness {
                 cwd: Some(cwd.to_string()),
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
 
@@ -359,6 +360,7 @@ mod fixture_harness {
                 cwd: Some("/p".into()),
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
         diffs.recv().await.unwrap();

@@ -28,6 +28,24 @@ export interface SessionView {
   subs: SubagentView[];
   /** Real `~/.claude/tasks/` data — absent for sessions that never used TaskCreate. */
   plan: PlanView | null;
+  /** The real `AskUserQuestion` question/options this session is blocked on,
+   * captured from the triggering hook's own `tool_input` — present only for
+   * that specific kind of wait. `null` for a plain permission-prompt/
+   * notification wait, or any non-`Waiting` session; the overlay falls back
+   * to the generic Approve/Reject/Send footer in that case. */
+  waiting_question: WaitingQuestion | null;
+}
+
+export interface WaitingOption {
+  label: string;
+  description: string | null;
+}
+
+export interface WaitingQuestion {
+  question: string;
+  header: string | null;
+  multi_select: boolean;
+  options: WaitingOption[];
 }
 
 export interface SubagentView {

@@ -26,10 +26,11 @@ use crate::collector::{parse_transcript_for_display, transcript_path, Transcript
 use crate::engine::{EngineCommand, EngineHandle, SessionView};
 use crate::memory_repo::{Memory, MemoryRepo, PurgeScope, ScoredMemory};
 use crate::ollama::OllamaClient;
-use crate::orchestrator::{DismissedSessions, WaitingSessions};
+use crate::orchestrator::{DismissedSessions, SessionTtys, WaitingSessions};
 use crate::tasks::{Column, ColumnPatch, RolesPatch, Stage, Task, TaskError, TaskHub, TasksSnapshot};
 use crate::terminal::{PtyInfo, PtyOutput, SpawnSpec, TerminalManager};
 use crate::trackers::{Link, TicketRef, TicketsResponse, TrackerOverview, Trackers};
+use crate::tty_input;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -60,6 +61,10 @@ pub struct AppState {
     /// Embedded PTY-backed terminals (see `terminal.rs`). Shared with
     /// `orchestrator::run`, which links a pending pty to its real session id.
     pub terminal: TerminalManager,
+    /// Fallback delivery target for approve/reject/answer when a session has
+    /// no embedded pty (see `SessionTtys`'s doc comment) — the common case
+    /// for a session running in an ordinary external terminal.
+    pub session_ttys: SessionTtys,
     /// Program spawned for a new/resumed session. `claude` in production;
     /// tests substitute a harmless fixture.
     pub claude_bin: String,
@@ -83,6 +88,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/approve", post(approve))
         .route("/sessions/{id}/reject", post(reject))
         .route("/sessions/{id}/reply", post(reply))
+        .route("/sessions/{id}/answer", post(answer))
         .route("/sessions/{id}/transcript", get(get_transcript))
         .route("/sessions/{id}", delete(delete_session))
         .route("/terminals/sessions/{session_id}", post(open_session_terminal))
@@ -753,37 +759,95 @@ async fn unmark_waiting(state: &AppState, id: &str) {
     }
 }
 
-async fn approve(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
-    unmark_waiting(&state, &id).await;
-    state
-        .engine
-        .dispatch(EngineCommand::ResolveWaiting { id, desc: "Resumed — applying your approval".into() })
-        .await;
+/// Where an approve/reject/answer decision actually gets delivered: an
+/// embedded pty the board itself opened (reliable, already-tested plumbing —
+/// see `terminal.rs`), or the session's bare tty device as a fallback for a
+/// session running in an ordinary external terminal (see `tty_input.rs`).
+enum DeliveryTarget {
+    Pty(String),
+    Tty(String),
+}
+
+async fn find_delivery_target(state: &AppState, id: &str) -> Option<DeliveryTarget> {
+    if let Some(pty_id) = state.terminal.find_by_session_id(id) {
+        return Some(DeliveryTarget::Pty(pty_id));
+    }
+    state.session_ttys.get(id).await.map(DeliveryTarget::Tty)
+}
+
+/// Actually delivers `bytes` to `id`'s session (see `find_delivery_target`)
+/// and, only on success, resolves the board's own `Waiting` state to match.
+/// Returns `409 Conflict` when delivery isn't possible — no pty or tty known
+/// (a Claude Desktop session, or one reconstructed after a restart) or the
+/// target is gone (window closed) — rather than silently flipping the board
+/// to look resolved while the real session never heard anything, which is
+/// the bug this whole module exists to fix.
+async fn deliver_and_resolve(state: &AppState, id: String, bytes: Vec<u8>, desc: String) -> StatusCode {
+    let Some(target) = find_delivery_target(state, &id).await else { return StatusCode::CONFLICT };
+    let delivered = match target {
+        DeliveryTarget::Pty(pty_id) => state.terminal.write(&pty_id, &bytes).await.is_ok(),
+        DeliveryTarget::Tty(tty) => tty_input::deliver(&tty, &bytes).is_ok(),
+    };
+    if !delivered {
+        return StatusCode::CONFLICT;
+    }
+    unmark_waiting(state, &id).await;
+    state.engine.dispatch(EngineCommand::ResolveWaiting { id, desc }).await;
     StatusCode::OK
+}
+
+async fn approve(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
+    deliver_and_resolve(&state, id, tty_input::approve_bytes(), "Resumed — applying your approval".into()).await
 }
 
 async fn reject(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
-    unmark_waiting(&state, &id).await;
-    state
-        .engine
-        .dispatch(EngineCommand::ResolveWaiting { id, desc: "Continuing without that change".into() })
-        .await;
-    StatusCode::OK
+    deliver_and_resolve(&state, id, tty_input::reject_bytes(), "Continuing without that change".into()).await
 }
 
+/// The drawer's free-text reply — types the text straight into the terminal
+/// and submits it with Enter. Most reliable when the session is genuinely
+/// sitting at a plain input prompt; a strict numbered permission menu
+/// ignores typed text entirely (see `tty_input`'s doc comment).
 async fn reply(
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: Option<Json<ReplyBody>>,
 ) -> StatusCode {
-    unmark_waiting(&state, &id).await;
     let text = body.and_then(|b| b.0.text).filter(|t| !t.trim().is_empty());
-    let desc = match text {
-        Some(t) => format!("Working on: {t}"),
-        None => "Working on your reply…".into(),
+    let Some(text) = text else { return StatusCode::BAD_REQUEST };
+    let desc = format!("Working on: {text}");
+    deliver_and_resolve(&state, id, tty_input::reply_bytes(&text), desc).await
+}
+
+#[derive(Deserialize, Default)]
+struct AnswerBody {
+    /// Labels of the chosen option(s) — one for a single-select question,
+    /// any number for a multi-select one. Ignored when `text` is present.
+    #[serde(default)]
+    selected: Vec<String>,
+    /// Free text for the question's own "Type something." option, instead of
+    /// picking from `selected`.
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Answers a real `AskUserQuestion` prompt — the multi-option case the plain
+/// Approve/Reject footer can't represent. `400` if this session isn't
+/// actually waiting on a captured question (nothing sensible to answer);
+/// `409` for the same "can't reach it" reasons as `deliver_and_resolve`.
+async fn answer(State(state): State<AppState>, Path(id): Path<String>, body: Option<Json<AnswerBody>>) -> StatusCode {
+    let Some(view) = state.engine.find(&id).await else { return StatusCode::NOT_FOUND };
+    let Some(question) = view.waiting_question else { return StatusCode::BAD_REQUEST };
+    let AnswerBody { selected, text } = body.map(|b| b.0).unwrap_or_default();
+    if text.is_none() && selected.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    let bytes = tty_input::answer_question_bytes(&question, &selected, text.as_deref());
+    let desc = match &text {
+        Some(t) => format!("Answered: {t}"),
+        None => format!("Chose: {}", selected.join(", ")),
     };
-    state.engine.dispatch(EngineCommand::ResolveWaiting { id, desc }).await;
-    StatusCode::OK
+    deliver_and_resolve(&state, id, bytes, desc).await
 }
 
 /// The board's "Delete" action — drops the session's live card immediately
@@ -986,6 +1050,7 @@ mod tests {
             dismissed_sessions: Arc::new(Mutex::new(DismissedSessions::load(&dismissed_sessions_path))),
             tasks: TaskHub::load(&app_dir_path.join("tasks.json")),
             terminal: TerminalManager::new(),
+            session_ttys: SessionTtys::new(),
             // `cat` echoes input back, which is all the terminal API tests need.
             claude_bin: "/bin/cat".into(),
             trackers: fake_trackers(),
@@ -1025,6 +1090,7 @@ mod tests {
                 cwd: Some("/x".into()),
                 started_at_ms: Some(0),
                 entrypoint: None,
+                waiting_question: None,
             })
             .await;
 
@@ -1056,6 +1122,7 @@ mod tests {
                 cwd: Some("/x".into()),
                 started_at_ms: Some(0),
                 entrypoint: None,
+                waiting_question: None,
             })
             .await;
 
@@ -1384,6 +1451,13 @@ mod tests {
         let (base, state) = spawn_test_server().await;
         let client = reqwest::Client::new();
 
+        // `approve`/`reject`/`reply` now actually deliver into the session's
+        // tty (see `tty_input`) before resolving the board's own state — a
+        // plain writable file stands in for a real terminal device here,
+        // since `tty_input::deliver` just opens-and-writes the path.
+        let fake_tty = tempfile::NamedTempFile::new().unwrap();
+        state.session_ttys.record("s1", fake_tty.path().to_str().unwrap()).await;
+
         state
             .engine
             .dispatch(EngineCommand::SessionEvent {
@@ -1393,6 +1467,7 @@ mod tests {
                 cwd: None,
                 started_at_ms: None,
                 entrypoint: None,
+                waiting_question: None,
             })
             .await;
         state
@@ -1404,6 +1479,7 @@ mod tests {
                 cwd: None,
                 started_at_ms: None,
                 entrypoint: None,
+                waiting_question: None,
             })
             .await;
 
@@ -1421,7 +1497,107 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(state.engine.snapshot().await[0].desc, "Working on: please also add tests");
+    }
 
+    /// Regression (user report): approve/reject/reply used to always return
+    /// 200 and flip the board's own state even when there was nothing behind
+    /// it to actually deliver the decision to — the real session never heard
+    /// anything. A session with no known pty or tty (Claude Desktop, or one
+    /// reconstructed after a restart) must fail loudly (409) and leave the
+    /// state untouched instead.
+    #[tokio::test]
+    async fn approve_without_a_known_target_returns_conflict_and_leaves_state_untouched() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+
+        state
+            .engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "s1".into(),
+                event: SessionEvent::SessionStart,
+                project: None,
+                cwd: None,
+                started_at_ms: None,
+                entrypoint: None,
+                waiting_question: None,
+            })
+            .await;
+        state
+            .engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "s1".into(),
+                event: SessionEvent::Notification,
+                project: None,
+                cwd: None,
+                started_at_ms: None,
+                entrypoint: None,
+                waiting_question: None,
+            })
+            .await;
+
+        let resp = client.post(format!("{base}/sessions/s1/approve")).send().await.unwrap();
+        assert_eq!(resp.status(), 409);
+        assert_eq!(state.engine.snapshot().await[0].state, crate::state::SessionState::Waiting);
+    }
+
+    /// The `AskUserQuestion` case the plain Approve/Reject footer can't
+    /// represent: answering by option label must select the right option's
+    /// numbered position and actually write it to the session's tty.
+    #[tokio::test]
+    async fn answer_selects_the_matching_option_and_delivers_it_to_the_tty() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+        let fake_tty = tempfile::NamedTempFile::new().unwrap();
+        state.session_ttys.record("s1", fake_tty.path().to_str().unwrap()).await;
+
+        let question = crate::engine::WaitingQuestion {
+            question: "Which animal do you pick?".into(),
+            header: Some("Animal".into()),
+            multi_select: false,
+            options: vec![
+                crate::engine::WaitingOption { label: "Dog".into(), description: None },
+                crate::engine::WaitingOption { label: "Cat".into(), description: None },
+            ],
+        };
+        state
+            .engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "s1".into(),
+                event: SessionEvent::SessionStart,
+                project: None,
+                cwd: None,
+                started_at_ms: None,
+                entrypoint: None,
+                waiting_question: None,
+            })
+            .await;
+        state
+            .engine
+            .dispatch(EngineCommand::SessionEvent {
+                id: "s1".into(),
+                event: SessionEvent::Notification,
+                project: None,
+                cwd: None,
+                started_at_ms: None,
+                entrypoint: None,
+                waiting_question: Some(question),
+            })
+            .await;
+
+        let resp = client
+            .post(format!("{base}/sessions/s1/answer"))
+            .json(&serde_json::json!({"selected": ["Cat"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let snapshot = state.engine.snapshot().await;
+        assert_eq!(snapshot[0].state, crate::state::SessionState::Working);
+        assert_eq!(snapshot[0].desc, "Chose: Cat");
+        assert!(snapshot[0].waiting_question.is_none(), "answering must clear the captured question");
+        // "Cat" is the tty's 2nd declared option -> digit "2", no trailing Enter.
+        assert_eq!(std::fs::read_to_string(fake_tty.path()).unwrap(), "2");
     }
 
     #[tokio::test]
@@ -1438,6 +1614,7 @@ mod tests {
                 cwd: None,
                 started_at_ms: None,
                 entrypoint: None,
+                waiting_question: None,
             })
             .await;
         assert_eq!(state.engine.snapshot().await.len(), 1);
@@ -1526,6 +1703,7 @@ mod tests {
                 cwd: Some("/x".into()),
                 started_at_ms: Some(0),
                 entrypoint: None,
+                waiting_question: None,
             })
             .await;
 
@@ -1656,6 +1834,7 @@ mod tests {
                 cwd: Some(cwd.clone()),
                 started_at_ms: Some(0),
                 entrypoint: None,
+                waiting_question: None,
             })
             .await;
 
@@ -1770,6 +1949,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
         state.engine.dispatch(EngineCommand::SetBoard { id: "w1".into(), board: "work".into() }).await;

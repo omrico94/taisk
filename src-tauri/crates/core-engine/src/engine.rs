@@ -75,10 +75,44 @@ pub struct SessionView {
     /// engine-internal bookkeeping field.
     #[serde(skip)]
     pub last_activity_ms: i64,
+    /// The real `AskUserQuestion` question/options captured from the
+    /// triggering `PreToolUse` hook's `tool_input`, present only while the
+    /// session is `Waiting` on that specific tool (see
+    /// `orchestrator::parse_ask_user_question`). `None` for a plain
+    /// permission-prompt/notification wait — the frontend falls back to the
+    /// generic Approve/Reject/Send footer in that case.
+    #[serde(default)]
+    pub waiting_question: Option<WaitingQuestion>,
 }
 
 fn default_board() -> String {
     crate::boards::DEFAULT_BOARD_ID.to_string()
+}
+
+/// One selectable option of a real `AskUserQuestion` question.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitingOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// A real `AskUserQuestion` question, captured verbatim from the tool's own
+/// `tool_input` (see `orchestrator::parse_ask_user_question`) so the board
+/// can render the actual question and options instead of a generic Approve/
+/// Reject footer that doesn't match what the session is really blocked on.
+/// Only the first question is captured when a single `AskUserQuestion` call
+/// asks several at once — answering one is enough to unblock the session
+/// (the CLI walks through the rest itself), and rendering/delivering a
+/// multi-question flow from the board is out of scope for now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitingQuestion {
+    pub question: String,
+    #[serde(default)]
+    pub header: Option<String>,
+    #[serde(default)]
+    pub multi_select: bool,
+    pub options: Vec<WaitingOption>,
 }
 
 /// A single tracked step from `~/.claude/tasks/<session_id>/*.json`
@@ -120,6 +154,7 @@ impl SessionView {
             subs: Vec::new(),
             plan: None,
             last_activity_ms: crate::now_ms(),
+            waiting_question: None,
         }
     }
 }
@@ -141,6 +176,12 @@ pub enum EngineCommand {
         cwd: Option<String>,
         entrypoint: Option<String>,
         started_at_ms: Option<i64>,
+        /// The `AskUserQuestion` question/options this event is driving the
+        /// session into `Waiting` for, if any — only ever supplied at the
+        /// `AskUserQuestion` `PreToolUse` dispatch site. Cleared automatically
+        /// whenever this event's transition takes the session *out* of
+        /// `Waiting`, regardless of what's passed here.
+        waiting_question: Option<WaitingQuestion>,
     },
     /// Set once, at summary time — see `SessionView::title`'s doc
     /// comment for why this is separate from `SetDesc`.
@@ -213,7 +254,7 @@ impl EngineHandle {
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    EngineCommand::SessionEvent { id, event, project, cwd, entrypoint, started_at_ms } => {
+                    EngineCommand::SessionEvent { id, event, project, cwd, entrypoint, started_at_ms, waiting_question } => {
                         // Only `SessionStart` may create a new entry. Any
                         // other event (notification, tool activity, stop,
                         // session-end) arriving for a session_id the engine
@@ -241,8 +282,16 @@ impl EngineHandle {
                             );
                         }
                         let view = sessions.get_mut(&id).expect("just inserted or already present");
+                        let was_waiting = view.state == SessionState::Waiting;
                         view.state = state::transition(view.state, event);
                         view.last_activity_ms = crate::now_ms();
+                        if view.state == SessionState::Waiting {
+                            if let Some(q) = waiting_question {
+                                view.waiting_question = Some(q);
+                            }
+                        } else if was_waiting {
+                            view.waiting_question = None;
+                        }
                         let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
                     }
                     EngineCommand::SetBoard { id, board } => {
@@ -294,6 +343,7 @@ impl EngineHandle {
                             view.state = state::transition(view.state, SessionEvent::UserReply);
                             view.desc = desc;
                             view.last_activity_ms = crate::now_ms();
+                            view.waiting_question = None;
                             let _ = diff_tx_actor.send(SessionDiff::Upserted(view.clone()));
                         }
                     }
@@ -333,6 +383,13 @@ impl EngineHandle {
         self.dispatch(EngineCommand::Snapshot { respond_to: tx }).await;
         rx.await.unwrap_or_default()
     }
+
+    /// A single session's current live view, if it exists — used by the API's
+    /// approve/reject/answer handlers to read `waiting_question` before
+    /// delivering an answer.
+    pub async fn find(&self, id: &str) -> Option<SessionView> {
+        self.snapshot().await.into_iter().find(|v| v.id == id)
+    }
 }
 
 /// Background loop: every `interval`, sweeps for `Working` sessions that have
@@ -367,6 +424,7 @@ mod tests {
                 cwd: Some("/Users/omricohen/api-gateway".into()),
                 entrypoint: None,
                 started_at_ms: Some(1000),
+                waiting_question: None,
             })
             .await;
 
@@ -399,6 +457,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         engine
@@ -409,6 +468,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
 
@@ -423,6 +483,7 @@ mod tests {
                 cwd: Some("/x".into()),
                 entrypoint: None,
                 started_at_ms: Some(1000),
+                waiting_question: None,
             })
             .await;
         let diff = diffs.recv().await.unwrap();
@@ -442,6 +503,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         engine
@@ -452,6 +514,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         assert_eq!(engine.snapshot().await[0].state, SessionState::Waiting);
@@ -482,6 +545,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
 
@@ -513,6 +577,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
         engine
@@ -523,6 +588,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
 
@@ -545,6 +611,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: Some(0),
+                waiting_question: None,
             })
             .await;
         engine.dispatch(EngineCommand::SweepIdle { now_ms: crate::now_ms() + 999_999_999, ttl_ms: 10_000 }).await;
@@ -558,6 +625,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         assert_eq!(engine.snapshot().await[0].state, SessionState::Working);
@@ -578,6 +646,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         assert_eq!(engine.snapshot().await[0].entrypoint, "cli");
@@ -590,6 +659,7 @@ mod tests {
                 cwd: None,
                 entrypoint: Some("claude-desktop".into()),
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         let snapshot = engine.snapshot().await;
@@ -608,6 +678,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         assert!(engine.snapshot().await[0].subs.is_empty());
@@ -646,6 +717,7 @@ mod tests {
                 cwd: None,
                 entrypoint: None,
                 started_at_ms: None,
+                waiting_question: None,
             })
             .await;
         diffs.recv().await.unwrap(); // the SessionStart upsert
