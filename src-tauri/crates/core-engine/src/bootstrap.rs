@@ -17,7 +17,7 @@ use crate::engine::EngineHandle;
 use crate::memory_repo::MemoryRepo;
 use crate::ollama::OllamaClient;
 use crate::terminal::TerminalManager;
-use crate::orchestrator::{self, DismissedSessions, OrchestratorConfig, WaitingSessions};
+use crate::orchestrator::{self, DismissedSessions, OrchestratorConfig, SessionTtys, WaitingSessions};
 
 pub struct BootstrapOptions {
     /// Path to the `hook-bridge` binary to register in
@@ -67,6 +67,9 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
     // resolution would, so it's shared here rather than owned solely by the
     // orchestrator.
     let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+    // In-memory only — see `SessionTtys`'s doc comment for why this is never
+    // persisted the way `waiting_sessions`/`dismissed_sessions` are.
+    let session_ttys = SessionTtys::new();
 
     let tasks = crate::tasks::TaskHub::load(&app_data_dir.join("tasks.json"));
 
@@ -89,6 +92,7 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
         dismissed_sessions.clone(),
         tasks.clone(),
         options.terminal.clone(),
+        session_ttys.clone(),
     ));
 
     Ok(AppState {
@@ -103,6 +107,7 @@ pub async fn start(ollama: Arc<dyn OllamaClient>, options: BootstrapOptions) -> 
         dismissed_sessions,
         tasks,
         terminal: options.terminal,
+        session_ttys,
         claude_bin: "claude".to_string(),
         trackers,
     })
