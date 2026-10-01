@@ -44,6 +44,12 @@ No cloud. No accounts. No API keys. **[Ollama](https://ollama.com) is optional:*
 
 ## Demo
 
+<p align="center">
+  <img src="docs/readme/demo.gif" alt="taisk demo: quick-add a task, import a GitHub issue, attach folders, start a session from the task, approve a permission prompt, and search history" width="900">
+</p>
+
+<sub>Scripted walkthrough, not a live recording. The source is [`docs/demo.html`](docs/demo.html) — open it in a browser to replay it.</sub>
+
 ### 1. Capture a task from anywhere — `⌥⌘N`
 
 Press the shortcut in Chrome, Safari, a full-screen movie, whatever. A small panel appears over it and takes your typing without pulling you out of the app you're in.
