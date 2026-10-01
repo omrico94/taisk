@@ -86,23 +86,23 @@ taisk is a native macOS app (Tauri). It relies on macOS APIs, so macOS is the su
 
 Works on Apple Silicon and Intel Macs running macOS 12 or later.
 
-> **Ollama is optional.** Skip steps 1 and 3 if you'd rather not run it. taisk detects that at launch and switches to **Claude-native** mode: cards take the title Claude Code itself generates for the session (or your `/rename`), the task line shows your latest prompt, and ⌘K search matches keywords instead of meaning. The toolbar shows which mode is active. Set `TAISK_INFERENCE=ollama` or `native` to force one.
+> **Ollama is optional.** Skip steps 2 and 3 if you'd rather not run it. taisk detects that at launch and switches to **Claude-native** mode: cards take the title Claude Code itself generates for the session (or your `/rename`), the task line shows your latest prompt, and ⌘K search matches keywords instead of meaning. The toolbar shows which mode is active. Set `TAISK_INFERENCE=ollama` or `native` to force one.
 
 [Claude Code](https://claude.com/claude-code) must be installed. It's the thing taisk watches.
 
-**1. (Optional) Install Ollama**
-
-```bash
-brew install --cask ollama-app      # or download from ollama.com
-```
-
-**2. Install taisk**
+**1. Install taisk**
 
 ```bash
 brew install --cask omrico94/taisk/taisk
 ```
 
 That taps `omrico94/homebrew-taisk` and installs `taisk.app` into `/Applications`. The app isn't notarized yet, so the cask clears macOS's quarantine flag for you.
+
+**2. (Optional) Install Ollama**
+
+```bash
+brew install --cask ollama-app      # or download from ollama.com
+```
 
 **3. (Optional) Pull the two small models taisk uses**
 
