@@ -16,8 +16,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/readme/board.png" alt="taisk board" width="900">
+  <img src="docs/readme/demo.gif" alt="taisk demo: quick-add a task, import a GitHub issue, attach folders, start a session from the task, approve a permission prompt, and search history" width="900">
 </p>
+
+<p align="center"><sub>Scripted walkthrough, not a live recording — source in <a href="docs/demo.html"><code>docs/demo.html</code></a>.</sub></p>
 
 ---
 
@@ -43,12 +45,6 @@ No cloud. No accounts. No API keys. **[Ollama](https://ollama.com) is optional:*
 - **Survives restarts.** The board is rebuilt from durable local storage, not a blank slate.
 
 ## Demo
-
-<p align="center">
-  <img src="docs/readme/demo.gif" alt="taisk demo: quick-add a task, import a GitHub issue, attach folders, start a session from the task, approve a permission prompt, and search history" width="900">
-</p>
-
-<sub>Scripted walkthrough, not a live recording. The source is [`docs/demo.html`](docs/demo.html) — open it in a browser to replay it.</sub>
 
 ### 1. Capture a task from anywhere — `⌥⌘N`
 
