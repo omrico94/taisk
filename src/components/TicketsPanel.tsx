@@ -85,7 +85,7 @@ export function TicketsPanel() {
     const f = filter.trim().toLowerCase();
     if (!f) return tickets.tickets;
     return tickets.tickets.filter((t) =>
-      [t.key, t.title, t.container, ...t.labels].some((s) => s.toLowerCase().includes(f)),
+      [t.key, t.title, t.container, t.assignee ?? "", ...t.labels].some((s) => s.toLowerCase().includes(f)),
     );
   }, [tickets, filter]);
 
