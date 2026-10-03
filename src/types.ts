@@ -107,6 +107,9 @@ export interface Task {
   directories: string[];
   /** The tracker ticket this task was imported from, if any. */
   ticket?: TicketRef | null;
+  /** Set on a task auto-created for a new session: its title follows that
+   *  session's until the user renames the task. */
+  auto_title_session?: string | null;
 }
 
 // Ticket trackers (GitHub, …). Everything here is provider-neutral — the UI
@@ -175,6 +178,10 @@ export interface TasksSnapshot {
   /** board id → layout; a board absent here uses `default_columns`. */
   columns: Record<string, BoardColumns>;
   default_columns: BoardColumns;
+  /** Boards in auto-task mode (each new session becomes its own task). */
+  auto_task_boards: string[];
+  /** Sessions that already got an auto-task. */
+  auto_tasked: string[];
 }
 
 /** One WS message: a session diff, or a full snapshot of tasks/assignments

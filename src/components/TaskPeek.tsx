@@ -14,6 +14,8 @@ const EMPTY: TasksSnapshot = {
   assignments: {},
   columns: {},
   default_columns: { columns: [], done: null, active: null, intake: null },
+  auto_task_boards: [],
+  auto_tasked: [],
 };
 
 /** One group per column name across boards (a column two boards share, e.g.

@@ -221,6 +221,11 @@ pub struct Task {
     /// Tasks saved before trackers existed deserialize to `None`.
     #[serde(default)]
     pub ticket: Option<TicketRef>,
+    /// Set on a task auto-created for a new session (auto-task mode): the
+    /// task's title mirrors that session's title until the user renames the
+    /// task, which clears this.
+    #[serde(default)]
+    pub auto_title_session: Option<SessionId>,
 }
 
 fn default_board() -> String {
@@ -240,6 +245,14 @@ pub struct TasksSnapshot {
     /// keeps its own copy. Never read back from disk.
     #[serde(default, skip_deserializing)]
     pub default_columns: BoardColumns,
+    /// Boards in auto-task mode: each new session there gets its own task in
+    /// the board's `active` column instead of landing in the tray.
+    #[serde(default)]
+    pub auto_task_boards: HashSet<String>,
+    /// Sessions that already got an auto-task, so a resume (or a user
+    /// unassigning it) never makes a second one.
+    #[serde(default)]
+    pub auto_tasked: HashSet<SessionId>,
 }
 
 pub struct TaskStore {
@@ -331,9 +344,60 @@ impl TaskStore {
             board: board.to_string(),
             directories: vec![],
             ticket: None,
+            auto_title_session: None,
         };
         self.data.tasks.push(task.clone());
         Some(task)
+    }
+
+    /// Turns auto-task mode on/off for `board`. Returns whether it changed.
+    pub fn set_auto_task(&mut self, board: &str, on: bool) -> bool {
+        if on {
+            self.data.auto_task_boards.insert(board.to_string())
+        } else {
+            self.data.auto_task_boards.remove(board)
+        }
+    }
+
+    /// Auto-task mode: files a new session as its own task in `board`'s
+    /// `active` column (else its intake column) and assigns it there. `None`
+    /// when the mode is off for `board`, the session is already assigned, or
+    /// it already got an auto-task once.
+    pub fn auto_task_for_session(&mut self, session_id: &str, board: &str, title: &str) -> Option<Task> {
+        if !self.data.auto_task_boards.contains(board)
+            || self.data.assignments.contains_key(session_id)
+            || self.data.auto_tasked.contains(session_id)
+        {
+            return None;
+        }
+        let layout = self.columns_of(board);
+        let stage = layout.active.clone().filter(|a| layout.has(a)).unwrap_or_else(|| layout.intake_or_first().to_string());
+        let title = if title.trim().is_empty() { "New session" } else { title };
+        let mut task = self.create_on_board(title, &stage, board)?;
+        task.auto_title_session = Some(session_id.to_string());
+        if let Some(t) = self.data.tasks.iter_mut().find(|t| t.id == task.id) {
+            t.auto_title_session = task.auto_title_session.clone();
+        }
+        self.data.assignments.insert(session_id.to_string(), task.id.clone());
+        self.data.auto_tasked.insert(session_id.to_string());
+        Some(task)
+    }
+
+    /// Mirrors a session's title into the task auto-created for it (until
+    /// the user renames that task). Returns whether anything changed.
+    pub fn sync_auto_title(&mut self, session_id: &str, title: &str) -> bool {
+        let title = title.trim();
+        if title.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for t in self.data.tasks.iter_mut() {
+            if t.auto_title_session.as_deref() == Some(session_id) && t.title != title {
+                t.title = title.to_string();
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Idempotent per `(board, provider, key)`: importing a ticket that
@@ -364,6 +428,7 @@ impl TaskStore {
             board: board.to_string(),
             directories: vec![],
             ticket: Some(ticket),
+            auto_title_session: None,
         };
         self.data.tasks.push(task.clone());
         Some((task, true))
@@ -394,6 +459,7 @@ impl TaskStore {
         let task = self.data.tasks.iter_mut().find(|t| t.id == id).ok_or(TaskError::NotFound)?;
         if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
             task.title = t.to_string();
+            task.auto_title_session = None; // a user rename wins from now on
         }
         if let Some(s) = stage {
             task.stage = s.to_string();
@@ -427,7 +493,8 @@ impl TaskStore {
             self.delete(id);
         }
         let had_layout = self.data.columns.remove(board).is_some();
-        !gone.is_empty() || had_layout
+        let had_auto = self.data.auto_task_boards.remove(board);
+        !gone.is_empty() || had_layout || had_auto
     }
 
     /// Appends a column to `board`. Color defaults to an unused palette one.
@@ -539,6 +606,18 @@ impl TaskStore {
 
     pub fn unassign_session(&mut self, session_id: &str) -> bool {
         self.data.assignments.remove(session_id).is_some()
+    }
+
+    /// A deleted session: drops its assignment and auto-task bookkeeping.
+    fn forget_session(&mut self, session_id: &str) -> bool {
+        let unassigned = self.unassign_session(session_id);
+        let was_auto = self.data.auto_tasked.remove(session_id);
+        for t in self.data.tasks.iter_mut() {
+            if t.auto_title_session.as_deref() == Some(session_id) {
+                t.auto_title_session = None;
+            }
+        }
+        unassigned || was_auto
     }
 }
 
@@ -687,10 +766,36 @@ impl TaskHub {
         .await
     }
 
-    /// Drops any assignment for a deleted session.
+    /// Drops any assignment (and auto-task record) for a deleted session.
     pub async fn forget_session(&self, session_id: &str) {
         self.mutate(|s| {
-            let changed = s.unassign_session(session_id);
+            let changed = s.forget_session(session_id);
+            ((), changed)
+        })
+        .await
+    }
+
+    pub async fn set_auto_task(&self, board: &str, on: bool) -> bool {
+        self.mutate(|s| {
+            let changed = s.set_auto_task(board, on);
+            (changed, changed)
+        })
+        .await
+    }
+
+    /// See `TaskStore::auto_task_for_session`.
+    pub async fn auto_task_for_session(&self, session_id: &str, board: &str, title: &str) -> Option<Task> {
+        self.mutate(|s| {
+            let t = s.auto_task_for_session(session_id, board, title);
+            let changed = t.is_some();
+            (t, changed)
+        })
+        .await
+    }
+
+    pub async fn sync_auto_title(&self, session_id: &str, title: &str) {
+        self.mutate(|s| {
+            let changed = s.sync_auto_title(session_id, title);
             ((), changed)
         })
         .await
@@ -928,5 +1033,71 @@ mod tests {
         s.set_roles("default", &RolesPatch { active: Some(None), intake: Some(Some(BACKLOG.into())), ..Default::default() }).unwrap();
         let l = s.columns_of("default");
         assert_eq!((l.done.as_deref(), l.active.as_deref(), l.intake.as_deref()), (Some(DONE), None, Some(BACKLOG)));
+    }
+
+    #[test]
+    fn auto_task_is_off_by_default_and_old_files_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        std::fs::write(&path, r#"{"tasks":[{"id":"t1","title":"Old","stage":"todo","created_at_ms":1}],"assignments":{}}"#).unwrap();
+        let mut s = TaskStore::load(&path);
+        assert_eq!(s.snapshot().tasks[0].auto_title_session, None);
+        assert!(s.snapshot().auto_task_boards.is_empty());
+        assert!(s.auto_task_for_session("s1", "default", "Fix bug").is_none());
+        assert!(s.snapshot().assignments.is_empty());
+    }
+
+    #[test]
+    fn auto_task_files_a_new_session_in_the_active_column() {
+        let (mut s, _d) = store();
+        assert!(s.set_auto_task("default", true));
+        assert!(!s.set_auto_task("default", true));
+        let t = s.auto_task_for_session("s1", "default", "Fix bug").unwrap();
+        assert_eq!((t.title.as_str(), t.stage.as_str()), ("Fix bug", IN_PROGRESS));
+        assert_eq!(t.auto_title_session.as_deref(), Some("s1"));
+        let snap = s.snapshot();
+        assert_eq!(snap.assignments.get("s1"), Some(&t.id));
+        assert_eq!(snap.tasks[0].auto_title_session.as_deref(), Some("s1"));
+        // Other boards are untouched.
+        assert!(s.auto_task_for_session("s2", "work", "Other").is_none());
+    }
+
+    #[test]
+    fn auto_task_falls_back_to_intake_without_an_active_column() {
+        let (mut s, _d) = store();
+        s.set_roles("default", &RolesPatch { active: Some(None), ..Default::default() }).unwrap();
+        s.set_auto_task("default", true);
+        assert_eq!(s.auto_task_for_session("s1", "default", "x").unwrap().stage, TODO);
+    }
+
+    #[test]
+    fn auto_task_skips_assigned_and_already_auto_tasked_sessions() {
+        let (mut s, _d) = store();
+        s.set_auto_task("default", true);
+        let manual = s.create("Manual", TODO).unwrap();
+        s.assign("s1", Some(&manual.id));
+        assert!(s.auto_task_for_session("s1", "default", "x").is_none());
+
+        s.auto_task_for_session("s2", "default", "y").unwrap();
+        s.assign("s2", None);
+        assert!(s.auto_task_for_session("s2", "default", "y").is_none());
+        assert_eq!(s.snapshot().tasks.len(), 2);
+        // A second session can still join the auto-created task.
+        let auto_id = s.snapshot().tasks[1].id.clone();
+        assert!(s.assign("s3", Some(&auto_id)));
+    }
+
+    #[test]
+    fn auto_title_follows_the_session_until_the_user_renames() {
+        let (mut s, _d) = store();
+        s.set_auto_task("default", true);
+        let t = s.auto_task_for_session("s1", "default", "Starting…").unwrap();
+        assert!(s.sync_auto_title("s1", "Auth refactor"));
+        assert!(!s.sync_auto_title("s1", "Auth refactor"));
+        assert!(!s.sync_auto_title("s1", "  "));
+        assert_eq!(s.snapshot().tasks[0].title, "Auth refactor");
+        s.update(&t.id, Some("My name"), None).unwrap();
+        assert!(!s.sync_auto_title("s1", "Something else"));
+        assert_eq!(s.snapshot().tasks[0].title, "My name");
     }
 }

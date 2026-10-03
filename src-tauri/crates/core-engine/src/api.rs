@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(ws_events))
         .route("/boards", get(list_boards).post(create_board))
         .route("/boards/{id}", patch(update_board).delete(delete_board))
+        .route("/boards/{id}/auto-task", put(set_auto_task))
         .route("/boards/{id}/columns", post(add_column))
         .route("/boards/{id}/columns/order", put(reorder_columns))
         .route("/boards/{id}/columns/roles", put(set_column_roles))
@@ -470,6 +471,25 @@ async fn update_board(
     Json(body): Json<UpdateBoardBody>,
 ) -> Result<Json<Board>, (StatusCode, Json<ApiError>)> {
     state.boards.rename(&id, &body.name).map(Json).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))
+}
+
+#[derive(Deserialize)]
+struct AutoTaskBody {
+    enabled: bool,
+}
+
+/// Turns the board's auto-task mode on/off: new sessions become their own
+/// task in the `active` column instead of landing in the tray.
+async fn set_auto_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AutoTaskBody>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    if state.boards.get(&id).is_none() {
+        return Err(api_error(StatusCode::NOT_FOUND, format!("no board {id:?}")));
+    }
+    state.tasks.set_auto_task(&id, body.enabled).await;
+    Ok(StatusCode::OK)
 }
 
 /// Removes a board: takes its live cards and its tasks off taisk and
