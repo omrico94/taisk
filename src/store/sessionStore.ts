@@ -86,6 +86,8 @@ interface SessionStoreState {
   /** Per-board column layouts, and the layout of a board never edited. */
   columns: Record<string, BoardColumns>;
   defaultColumns: BoardColumns;
+  /** Boards in auto-task mode (see `tasks.rs`). */
+  autoTaskBoards: string[];
   query: string;
   selectedId: string | null;
   askOpen: boolean;
@@ -159,6 +161,7 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   assignments: {},
   columns: {},
   defaultColumns: NO_COLUMNS,
+  autoTaskBoards: [],
   query: "",
   selectedId: null,
   askOpen: false,
@@ -217,7 +220,13 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
       return { sessions: next, selectedId: state.selectedId === id ? null : state.selectedId };
     }),
   setTasksSnapshot: (snap) =>
-    set({ tasks: snap.tasks, assignments: snap.assignments, columns: snap.columns, defaultColumns: snap.default_columns }),
+    set({
+      tasks: snap.tasks,
+      assignments: snap.assignments,
+      columns: snap.columns,
+      defaultColumns: snap.default_columns,
+      autoTaskBoards: snap.auto_task_boards ?? [],
+    }),
   setQuery: (query) => set({ query }),
   selectCard: (selectedId) => set({ selectedId, replyText: "" }),
   setAskOpen: (askOpen) => set({ askOpen }),
@@ -278,6 +287,11 @@ export function useBoardSessions(): SessionView[] {
 /** Tasks on the board being viewed. */
 export function useBoardTasks(): Task[] {
   return useSessionStore(useShallow((s) => s.tasks.filter((t) => t.board === s.activeBoardId)));
+}
+
+/** Whether the board being viewed is in auto-task mode. */
+export function useAutoTaskOn(): boolean {
+  return useSessionStore((s) => s.autoTaskBoards.includes(s.activeBoardId));
 }
 
 /** Column layout of the board being viewed. */

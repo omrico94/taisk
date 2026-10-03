@@ -216,6 +216,11 @@ export async function deleteColumn(board: string, id: string, moveTasksTo: strin
   await boardRequest(`${columnsUrl(board)}/${encodeURIComponent(id)}?${q}`, { method: "DELETE" });
 }
 
+/** Auto-task mode: each new session on `board` becomes its own task. */
+export async function setAutoTask(board: string, enabled: boolean): Promise<void> {
+  await boardRequest(`${API_BASE}/boards/${encodeURIComponent(board)}/auto-task`, jsonInit("PUT", { enabled }));
+}
+
 // ---- Ticket trackers (provider-neutral: GitHub today, others later) ----
 
 const boardQuery = (board: string) => `board=${encodeURIComponent(board)}`;

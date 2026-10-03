@@ -21,7 +21,7 @@ use crate::collector::{
     project_name_from_cwd, read_lines_from_start, tail_new_lines, transcript_path, TailCheckpoints,
 };
 use crate::boards::{BoardStore, DEFAULT_BOARD_ID};
-use crate::engine::{EngineCommand, EngineHandle, WaitingOption, WaitingQuestion};
+use crate::engine::{EngineCommand, EngineHandle, SessionDiff, WaitingOption, WaitingQuestion};
 use crate::hook_socket::{self, HookEvent};
 use crate::memory_repo::MemoryRepo;
 use crate::ollama::OllamaClient;
@@ -623,6 +623,8 @@ pub async fn run(
     )
     .await;
 
+    tokio::spawn(run_auto_task_title_sync(engine.clone(), tasks.clone()));
+
     tokio::spawn(run_done_sweeper(
         engine.clone(),
         ended_sessions.clone(),
@@ -640,6 +642,15 @@ pub async fn run(
             let tid = event.payload.get("sessionboard_task_id").and_then(|v| v.as_str());
             if let (Some(sid), Some(tid)) = (sid, tid) {
                 tokio::spawn(assign_when_visible(engine.clone(), tasks.clone(), sid.to_string(), tid.to_string(), orch_config.transcript_wait));
+            } else if let Some(sid) = sid {
+                // Auto-task mode (per board, checked once it's visible) only
+                // files brand-new sessions: one the engine already knows (a
+                // resume of a reconstructed session) is left where it is.
+                // Checked here, before the handler below can dispatch its
+                // `SessionStart`.
+                if !engine.snapshot().await.iter().any(|s| s.id == sid) {
+                    tokio::spawn(auto_task_when_visible(engine.clone(), tasks.clone(), sid.to_string(), orch_config.transcript_wait));
+                }
             }
             // A terminal embedded in the board tagged this session's process
             // too; in-memory bookkeeping only, so no need to wait for the
@@ -700,6 +711,42 @@ async fn assign_when_visible(engine: EngineHandle, tasks: TaskHub, session_id: S
             return;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Auto-task mode: once a new session surfaces, give it its own task (a
+/// no-op unless the mode is on for the session's board — see
+/// `TaskStore::auto_task_for_session`). Same bounded poll as
+/// `assign_when_visible`.
+async fn auto_task_when_visible(engine: EngineHandle, tasks: TaskHub, session_id: String, wait: Duration) {
+    let deadline = tokio::time::Instant::now() + wait + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        let sessions = engine.snapshot().await;
+        if let Some(view) = sessions.iter().find(|s| s.id == session_id) {
+            tasks.auto_task_for_session(&session_id, &view.board, &view.title).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Keeps an auto-created task's title in step with its session's title
+/// (Starting… → prompt words → summarized / `/rename`d title) until the user
+/// renames the task.
+async fn run_auto_task_title_sync(engine: EngineHandle, tasks: TaskHub) {
+    let mut rx = engine.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(SessionDiff::Upserted(view)) => tasks.sync_auto_title(&view.id, &view.title).await,
+            Ok(SessionDiff::Removed(_)) => {}
+            // Missed some diffs: catch up from the full snapshot instead.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                for view in engine.snapshot().await {
+                    tasks.sync_auto_title(&view.id, &view.title).await;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
     }
 }
 
@@ -1862,6 +1909,8 @@ mod tests {
 
         let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
         let task = tasks.create("Billing", crate::tasks::stage::TODO).await.expect("task should be created");
+        // Auto-task mode must not double-file a session launched from a task.
+        tasks.set_auto_task(DEFAULT_BOARD_ID, true).await;
 
         tokio::spawn(run(
             engine.clone(),
@@ -1897,6 +1946,85 @@ mod tests {
                 break;
             }
             assert!(tokio::time::Instant::now() < deadline, "session should have been assigned to its task in time");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(tasks.snapshot().await.tasks.len(), 1, "no auto-task for a task-launched session");
+    }
+
+    /// Auto-task mode: an untagged new session gets its own task in the
+    /// board's active column, and the task's title follows the session's.
+    #[tokio::test]
+    async fn auto_task_mode_files_a_new_session_as_its_own_in_progress_task() {
+        let claude_dir = tempfile::tempdir().unwrap();
+        let lance_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+
+        let cwd = "/Users/omricohen/api-gateway";
+        let session_id = "orch-auto-1";
+        let path = transcript_path(claude_dir.path(), cwd, session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({"type":"user","message":{"role":"user","content":"Wire up the new billing webhook"}}).to_string() + "\n",
+        )
+        .unwrap();
+
+        let engine = EngineHandle::spawn();
+        let repo = Arc::new(MemoryRepo::open(lance_dir.path().to_str().unwrap()).await.unwrap());
+        let ollama: Arc<dyn OllamaClient> = Arc::new(FakeOllamaClient::new_summarizing("Billing webhook"));
+        let socket_path = app_dir.path().join("engine.sock");
+        let orch_config = Arc::new(OrchestratorConfig {
+            claude_projects_dir: claude_dir.path().to_path_buf(),
+            checkpoint_path: app_dir.path().join("tail-checkpoints.json"),
+            socket_path: socket_path.clone(),
+            transcript_wait: Duration::from_millis(500),
+            waiting_sessions_path: app_dir.path().join("waiting-sessions.json"),
+            ..OrchestratorConfig::default()
+        });
+        let waiting_sessions = Arc::new(Mutex::new(WaitingSessions::load(&orch_config.waiting_sessions_path)));
+        let dismissed_sessions = Arc::new(Mutex::new(DismissedSessions::load(&orch_config.dismissed_sessions_path)));
+        let tasks = TaskHub::load(&app_dir.path().join("tasks.json"));
+        tasks.set_auto_task(DEFAULT_BOARD_ID, true).await;
+
+        tokio::spawn(run(
+            engine.clone(),
+            repo.clone(),
+            ollama,
+            Arc::new(SummarizeConfig::default()),
+            orch_config,
+            waiting_sessions,
+            dismissed_sessions,
+            tasks.clone(),
+            TerminalManager::new(),
+            SessionTtys::new(),
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let envelope = serde_json::json!({
+            "event": "session-start",
+            "payload": real_session_start_payload(session_id, cwd, &path, "startup"),
+        });
+        tokio::task::spawn_blocking(move || {
+            let mut stream = StdUnixStream::connect(&socket_path).unwrap();
+            stream.write_all(envelope.to_string().as_bytes()).unwrap();
+        })
+        .await
+        .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let snap = tasks.snapshot().await;
+            let session_title = engine.snapshot().await.into_iter().find(|v| v.id == session_id).map(|v| v.title);
+            if let (Some(task), Some(title)) = (snap.tasks.first(), session_title) {
+                if title != "Starting…" && task.title == title {
+                    assert_eq!(snap.tasks.len(), 1);
+                    assert_eq!(task.stage, crate::tasks::stage::IN_PROGRESS);
+                    assert_eq!(snap.assignments.get(session_id), Some(&task.id));
+                    break;
+                }
+            }
+            assert!(tokio::time::Instant::now() < deadline, "session should have become its own titled task: {snap:?}");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
