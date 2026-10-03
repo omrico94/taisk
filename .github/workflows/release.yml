@@ -23,6 +23,11 @@ name: release
 on:
   push:
     branches: [main]
+    # Docs-only merges don't warrant a release. Path filters are only
+    # evaluated for branch pushes - a `v*` tag push always runs.
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
     tags: ["v*"]
 
 permissions:
