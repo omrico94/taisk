@@ -116,7 +116,17 @@ pub trait Credentials: Send + Sync {
 
 /// OS keychain (macOS Keychain, Windows Credential Manager, Linux keyutils),
 /// service `taisk`, account `<provider>:<field>`.
-pub struct KeychainCredentials;
+///
+/// Reads are cached in memory (misses too) for the life of the process: every
+/// keychain read can raise a macOS "taisk wants to use your confidential
+/// information" prompt — always so for an unsigned/dev build, whose changing
+/// signature voids "Always Allow" — and GitHub calls happen on nearly every
+/// tickets interaction plus the background refresher. At most one prompt per
+/// field per launch.
+#[derive(Default)]
+pub struct KeychainCredentials {
+    cache: Mutex<HashMap<(String, String), Option<String>>>,
+}
 
 impl KeychainCredentials {
     fn entry(provider: &str, field: &str) -> Result<keyring::Entry, String> {
@@ -126,16 +136,27 @@ impl KeychainCredentials {
 
 impl Credentials for KeychainCredentials {
     fn get(&self, provider: &str, field: &str) -> Option<String> {
-        Self::entry(provider, field).ok()?.get_password().ok().filter(|s| !s.is_empty())
+        let key = (provider.to_string(), field.to_string());
+        if let Some(cached) = self.cache.lock().unwrap().get(&key) {
+            return cached.clone();
+        }
+        let value = Self::entry(provider, field).ok().and_then(|e| e.get_password().ok()).filter(|s| !s.is_empty());
+        self.cache.lock().unwrap().insert(key, value.clone());
+        value
     }
 
     fn set(&self, provider: &str, field: &str, value: &str) -> Result<(), String> {
-        Self::entry(provider, field)?.set_password(value).map_err(|e| format!("couldn't save to the system keychain: {e}"))
+        Self::entry(provider, field)?.set_password(value).map_err(|e| format!("couldn't save to the system keychain: {e}"))?;
+        self.cache.lock().unwrap().insert((provider.to_string(), field.to_string()), Some(value.to_string()));
+        Ok(())
     }
 
     fn delete(&self, provider: &str, field: &str) -> Result<(), String> {
         match Self::entry(provider, field)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Ok(()) | Err(keyring::Error::NoEntry) => {
+                self.cache.lock().unwrap().insert((provider.to_string(), field.to_string()), None);
+                Ok(())
+            }
             Err(e) => Err(e.to_string()),
         }
     }
@@ -305,7 +326,7 @@ pub fn default_credentials() -> Arc<dyn Credentials> {
     if std::env::var_os("SESSIONBOARD_EPHEMERAL_CREDENTIALS").is_some() {
         Arc::new(MemoryCredentials::default())
     } else {
-        Arc::new(KeychainCredentials)
+        Arc::new(KeychainCredentials::default())
     }
 }
 
