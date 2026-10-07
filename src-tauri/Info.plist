@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Claude Code sessions you open in taisk's terminal work on files in your Desktop folder.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Claude Code sessions you open in taisk's terminal work on files in your Documents folder.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Claude Code sessions you open in taisk's terminal work on files in your Downloads folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>Claude Code sessions you open in taisk's terminal work on files on removable drives.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>Claude Code sessions you open in taisk's terminal work on files on network drives.</string>
+</dict>
+</plist>

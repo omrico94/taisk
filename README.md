@@ -140,6 +140,7 @@ taisk's hooks stay in `~/.claude/settings.json` after uninstalling. They fail si
 | macOS says the app "can't be opened" | Right-click taisk in `/Applications` → **Open** once, or run `xattr -cr /Applications/taisk.app` |
 | `brew` can't find the cask | Run `brew update`, or `brew tap omrico94/taisk` first |
 | Sessions show up with crude titles | In Claude-native mode the title upgrades to Claude's own after the first reply. With Ollama, check it's running and both models are pulled (step 3) |
+| "taisk would like to access files in your Desktop/Documents folder" keeps coming back | Sessions in taisk's terminal run as part of taisk, so macOS asks on taisk's behalf when `claude` reads those folders (a session started in your home folder reads them constantly). Releases are ad-hoc signed so your answer sticks until the next update; a `npm run tauri dev` build isn't a signed bundle and will keep asking. To stop it entirely, give taisk Full Disk Access (System Settings → Privacy & Security), or attach a project directory to the task (⌂) so sessions don't start in `~` |
 | A session never appears | It must have sent at least one prompt, and taisk must have been launched at least once so its hooks are registered |
 
 ### Build from source
