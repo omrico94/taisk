@@ -27,6 +27,7 @@ export function TerminalPanel() {
   const session = useSessionStore((s) => (s.terminal.sessionId ? s.sessions[s.terminal.sessionId] : undefined));
   const taskTitle = useSessionStore((s) => s.tasks.find((t) => t.id === s.terminal.taskId)?.title);
   const toggle = useSessionStore((s) => s.toggleTerminalCollapsed);
+  const close = useSessionStore((s) => s.closeTerminal);
   const height = useSessionStore((s) => s.terminalHeight);
   const setHeight = useSessionStore((s) => s.setTerminalHeight);
   const [dragging, setDragging] = useState(false);
@@ -133,21 +134,34 @@ export function TerminalPanel() {
           data-testid="terminal-resizer"
         />
       )}
-      <button
-        className={styles.header}
-        onClick={toggle}
-        aria-expanded={!terminal.collapsed}
-        title={terminal.collapsed ? "Expand terminal" : "Collapse terminal"}
-      >
-        <span className={styles.chevron} data-collapsed={terminal.collapsed}>
-          ▾
-        </span>
-        <span className={styles.kind}>Terminal</span>
-        <span className={styles.label} data-testid="terminal-label">
-          {label}
-        </span>
-        {!terminal.alive && <span className={styles.ended}>· session ended</span>}
-      </button>
+      <div className={styles.headerRow}>
+        <button
+          className={styles.header}
+          onClick={toggle}
+          aria-expanded={!terminal.collapsed}
+          title={terminal.collapsed ? "Expand terminal" : "Collapse terminal"}
+        >
+          <span className={styles.chevron} data-collapsed={terminal.collapsed}>
+            ▾
+          </span>
+          <span className={styles.kind}>Terminal</span>
+          <span className={styles.label} data-testid="terminal-label">
+            {label}
+          </span>
+          {!terminal.alive && <span className={styles.ended}>· session ended</span>}
+        </button>
+        {/* Detaches the pane only: the backend keeps the `claude` process
+            running, and the session's card reopens it. */}
+        <button
+          className={styles.close}
+          onClick={close}
+          aria-label="Close terminal"
+          title={terminal.alive ? "Close terminal (the session keeps running)" : "Close terminal"}
+          data-testid="terminal-close"
+        >
+          ✕
+        </button>
+      </div>
       <div
         className={`${styles.body} ${terminal.collapsed ? styles.bodyCollapsed : ""} ${dragging ? styles.bodyDragging : ""}`}
       >

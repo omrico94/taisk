@@ -19,6 +19,27 @@ fn login_board_terminal(config_dir: String) -> Result<(), String> {
     run_in_terminal(&shell_cmd)
 }
 
+/// Folder picker for a task's directories. The dialog plugin's own JS `open()`
+/// attaches the panel to the calling window as a macOS sheet, which could
+/// leave the whole app blocked (window unresponsive, picker nowhere to be
+/// seen). This shows a standalone panel instead, driven by the non-blocking
+/// `pick_folder` callback so neither the main thread nor the IPC thread
+/// waits on it. Returns `None` when the user cancels.
+#[tauri::command]
+async fn pick_directory(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Choose a directory")
+        .set_can_create_directories(true)
+        .pick_folder(move |picked| {
+            let _ = tx.send(picked);
+        });
+    let picked = rx.await.ok().flatten()?;
+    picked.into_path().ok().map(|p| p.to_string_lossy().into_owned())
+}
+
 /// POSIX single-quote escaping, so a path or id can't break out of its quoting
 /// or inject extra shell commands.
 fn shell_single_quote(s: &str) -> String {
@@ -61,7 +82,7 @@ pub fn run() {
         builder = builder.plugin(tauri_nspanel::init());
     }
     builder
-        .invoke_handler(tauri::generate_handler![login_board_terminal])
+        .invoke_handler(tauri::generate_handler![login_board_terminal, pick_directory])
         .on_window_event(shortcuts::on_window_event)
         .setup(move |app| {
             shortcuts::setup(app)?;

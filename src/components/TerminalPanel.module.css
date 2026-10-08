@@ -7,11 +7,14 @@
   background: var(--tk-terminal-bg);
 }
 
+.headerRow { display: flex; align-items: stretch; background: var(--tk-surface); }
+
 .header {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 9px;
-  width: 100%;
   padding: 7px 14px;
   border: none;
   background: var(--tk-surface);
@@ -22,6 +25,18 @@
   cursor: pointer;
 }
 .header:hover { background: var(--tk-raised); }
+
+.close {
+  flex: 0 0 auto;
+  padding: 0 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.close:hover { background: var(--tk-raised); color: var(--text-primary); }
 
 .chevron { display: inline-block; font-size: 11px; color: var(--text-muted); transition: transform 0.28s var(--ease-standard); }
 .chevron[data-collapsed="true"] { transform: rotate(-90deg); }
