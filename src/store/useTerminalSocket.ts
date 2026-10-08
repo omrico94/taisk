@@ -91,6 +91,17 @@ export function useTerminalSocket(term: Terminal | null): void {
       send({ type: "input", data: bytesToB64(Uint8Array.from(data, (c) => c.charCodeAt(0))) });
     });
     const onResize = term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
+    // xterm sends a bare CR for Shift+Enter, which Claude Code reads as
+    // "submit". Send ESC+CR instead (what Option+Enter / `/terminal-setup`
+    // produce), which Claude Code treats as "insert a newline".
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.key !== "Enter" || !ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey) return true;
+      if (ev.type === "keydown") {
+        ev.preventDefault();
+        send({ type: "input", data: bytesToB64(encoder.encode("\x1b\r")) });
+      }
+      return false;
+    });
 
     return () => {
       cancelled = true;
@@ -98,6 +109,7 @@ export function useTerminalSocket(term: Terminal | null): void {
       onData.dispose();
       onBinary.dispose();
       onResize.dispose();
+      term.attachCustomKeyEventHandler(() => true);
       ws?.close();
     };
   }, [ptyId, term, resolveTerminalSession, setTerminalAlive]);

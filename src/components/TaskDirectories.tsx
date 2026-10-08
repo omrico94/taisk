@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { setTaskDirectories } from "../api";
 import type { Task } from "../types";
 import styles from "./Kanban.module.css";
@@ -19,6 +19,7 @@ const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 export function TaskDirectories({ task, editing, onDone }: Props) {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
 
   const save = async (directories: string[]) => {
     try {
@@ -37,11 +38,20 @@ export function TaskDirectories({ task, editing, onDone }: Props) {
     if (await save([...task.directories, path])) setDraft("");
   };
 
+  // Native picker (see `pick_directory` in src-tauri/src/lib.rs). Guarded so
+  // repeated clicks can't stack panels.
   const browse = async () => {
-    const picked = await open({ directory: true, multiple: false, title: "Choose a directory" });
-    if (typeof picked !== "string") return; // cancelled
-    if (task.directories.includes(picked)) return;
-    await save([...task.directories, picked]);
+    if (picking) return;
+    setPicking(true);
+    try {
+      const picked = await invoke<string | null>("pick_directory");
+      if (!picked || task.directories.includes(picked)) return; // cancelled / already there
+      await save([...task.directories, picked]);
+    } catch (err) {
+      setError(`Couldn't open the folder picker: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setPicking(false);
+    }
   };
 
   return (
@@ -94,9 +104,10 @@ export function TaskDirectories({ task, editing, onDone }: Props) {
               type="button"
               className={styles.dirBrowse}
               onClick={() => void browse()}
+              disabled={picking}
               data-testid="task-directory-browse"
             >
-              Browse…
+              {picking ? "Choosing…" : "Browse…"}
             </button>
           </div>
           {error ? (
