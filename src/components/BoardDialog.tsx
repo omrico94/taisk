@@ -2,9 +2,10 @@ import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { useShallow } from "zustand/react/shallow";
-import { createBoard, deleteBoard, renameBoard } from "../api";
+import { createBoard, deleteBoard, renameBoard, setBoardDirectories } from "../api";
 import { useSessionStore } from "../store/sessionStore";
 import { DEFAULT_BOARD_ID, type Board } from "../types";
+import { DirectoryList } from "./DirectoryList";
 import styles from "./BoardDialog.module.css";
 
 function suggestConfigDir(name: string): string {
@@ -36,6 +37,7 @@ export function BoardDialog() {
   const [busy, setBusy] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
+  const [editingDirsId, setEditingDirsId] = useState<string | null>(null);
   // Arm/confirm instead of window.confirm(), which Tauri's WebView swallows.
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
@@ -44,6 +46,7 @@ export function BoardDialog() {
     setError(null);
     setConfirmingId(null);
     setRenamingId(null);
+    setEditingDirsId(null);
   };
 
   const add = async () => {
@@ -146,6 +149,14 @@ export function BoardDialog() {
                     <div className={styles.rowDir}>{board.config_dir}</div>
                   </div>
                   <div className={styles.rowActions}>
+                    <button
+                      className={`${styles.small} ${editingDirsId === board.id ? styles.smallOn : ""}`}
+                      onClick={() => setEditingDirsId(editingDirsId === board.id ? null : board.id)}
+                      title="Default folders for new sessions started from this board's tasks"
+                      data-testid="edit-board-directories"
+                    >
+                      Folders{board.directories.length > 0 ? ` (${board.directories.length})` : ""}
+                    </button>
                     {board.id !== DEFAULT_BOARD_ID && (
                       <button className={styles.small} onClick={() => login(board)} title="Open Terminal to log in">
                         Log in
@@ -176,6 +187,18 @@ export function BoardDialog() {
                       </button>
                     )}
                   </div>
+                  {(editingDirsId === board.id || board.directories.length > 0) && (
+                    <div className={styles.rowDirs}>
+                      <DirectoryList
+                        directories={board.directories}
+                        save={async (dirs) => upsertBoard(await setBoardDirectories(board.id, dirs))}
+                        editing={editingDirsId === board.id}
+                        onDone={() => setEditingDirsId(null)}
+                        emptyHint="Used when a task has no folders of its own and no earlier session. The first is the working directory; others are added with --add-dir."
+                        testId="board"
+                      />
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

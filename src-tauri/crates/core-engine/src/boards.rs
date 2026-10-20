@@ -20,6 +20,12 @@ pub struct Board {
     pub id: String,
     pub name: String,
     pub config_dir: PathBuf,
+    /// Default directories for sessions started from this board's tasks:
+    /// used when the task has none of its own and no session to reuse a cwd
+    /// from. First is the cwd, the rest go to `claude --add-dir`. Validated
+    /// by the API, like `Task::directories`.
+    #[serde(default)]
+    pub directories: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -72,19 +78,22 @@ impl BoardStore {
         Self { path: Some(path.to_path_buf()), inner: RwLock::new(inner) }
     }
 
-    fn default_board(name: Option<&str>) -> Board {
+    /// The default board, with whatever the user customised (name,
+    /// directories) from its stored entry, if any. Its config dir is never
+    /// stored — it always follows `claude_config_dir()`.
+    fn default_board(stored: Option<&Board>) -> Board {
         Board {
             id: DEFAULT_BOARD_ID.to_string(),
-            name: name.unwrap_or("Default").to_string(),
+            name: stored.map_or_else(|| "Default".to_string(), |b| b.name.clone()),
             config_dir: crate::first_run::claude_config_dir(),
+            directories: stored.map(|b| b.directories.clone()).unwrap_or_default(),
         }
     }
 
     /// Default board first, then user boards in creation order.
     pub fn list(&self) -> Vec<Board> {
         let inner = self.inner.read().unwrap();
-        let default_name = inner.boards.iter().find(|b| b.id == DEFAULT_BOARD_ID).map(|b| b.name.clone());
-        let mut out = vec![Self::default_board(default_name.as_deref())];
+        let mut out = vec![Self::default_board(inner.boards.iter().find(|b| b.id == DEFAULT_BOARD_ID))];
         out.extend(inner.boards.iter().filter(|b| b.id != DEFAULT_BOARD_ID).cloned());
         out
     }
@@ -124,7 +133,7 @@ impl BoardStore {
             n += 1;
         }
 
-        let board = Board { id, name: name.to_string(), config_dir: dir };
+        let board = Board { id, name: name.to_string(), config_dir: dir, directories: vec![] };
         self.inner.write().unwrap().boards.push(board.clone());
         self.save().map_err(|e| e.to_string())?;
         Ok(board)
@@ -138,11 +147,24 @@ impl BoardStore {
         if self.list().iter().any(|b| b.id != id && b.name.eq_ignore_ascii_case(name)) {
             return Err("a board with that name already exists".into());
         }
+        self.edit(id, |b| b.name = name.to_string())
+    }
+
+    /// Replaces the board's default directories (already validated).
+    pub fn set_directories(&self, id: &str, directories: Vec<String>) -> Result<Board, String> {
+        self.edit(id, |b| b.directories = directories)
+    }
+
+    /// Applies `f` to the stored board, first storing the default board's
+    /// entry if it has never been customised before.
+    fn edit(&self, id: &str, f: impl FnOnce(&mut Board)) -> Result<Board, String> {
         {
             let mut inner = self.inner.write().unwrap();
+            if id == DEFAULT_BOARD_ID && !inner.boards.iter().any(|b| b.id == id) {
+                inner.boards.push(Self::default_board(None));
+            }
             match inner.boards.iter_mut().find(|b| b.id == id) {
-                Some(b) => b.name = name.to_string(),
-                None if id == DEFAULT_BOARD_ID => inner.boards.push(Self::default_board(Some(name))),
+                Some(b) => f(b),
                 None => return Err("no such board".into()),
             }
         }
@@ -244,6 +266,26 @@ mod tests {
         assert_eq!(reloaded.get(DEFAULT_BOARD_ID).unwrap().name, "Personal");
         assert_eq!(reloaded.board_of("s1"), "work");
         assert_eq!(reloaded.board_of("unknown"), DEFAULT_BOARD_ID);
+    }
+
+    #[test]
+    fn directories_persist_for_any_board_and_old_files_load_without_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boards.json");
+        std::fs::write(&path, r#"{"boards":[{"id":"work","name":"Work","config_dir":"/tmp/claude-work"}]}"#).unwrap();
+        let store = BoardStore::load(&path);
+        assert!(store.get("work").unwrap().directories.is_empty());
+        store.set_directories("work", vec!["/a".into(), "/b".into()]).unwrap();
+        store.set_directories(DEFAULT_BOARD_ID, vec!["/c".into()]).unwrap();
+        assert!(store.set_directories("ghost", vec![]).is_err());
+
+        let reloaded = BoardStore::load(&path);
+        assert_eq!(reloaded.get("work").unwrap().directories, vec!["/a", "/b"]);
+        let default = reloaded.get(DEFAULT_BOARD_ID).unwrap();
+        assert_eq!((default.name.as_str(), default.directories.clone()), ("Default", vec!["/c".to_string()]));
+        // Renaming keeps the directories, and vice versa.
+        reloaded.rename(DEFAULT_BOARD_ID, "Personal").unwrap();
+        assert_eq!(reloaded.get(DEFAULT_BOARD_ID).unwrap().directories, vec!["/c"]);
     }
 
     #[test]

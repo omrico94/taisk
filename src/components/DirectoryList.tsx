@@ -1,29 +1,40 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { setTaskDirectories } from "../api";
-import type { Task } from "../types";
 import styles from "./Kanban.module.css";
 
 interface Props {
-  task: Task;
+  directories: string[];
+  /** Persists the new list; throws with the backend's validation message. */
+  save: (directories: string[]) => Promise<void>;
   editing: boolean;
   onDone: () => void;
+  /** Shown under the input while the list is empty. */
+  emptyHint?: string;
+  /** Prefix for the `data-testid`s ("task" → `task-directories`, …). */
+  testId?: string;
 }
 
 const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 
-// Directories attached to a task. A session started from the task (the card's
-// "+") runs in the first one and gets the rest via `claude --add-dir`. The
-// backend validates and normalizes paths (`~` expansion, must exist) and the
-// change comes back through the usual TasksChanged snapshot.
-export function TaskDirectories({ task, editing, onDone }: Props) {
+// An editable list of directories — a task's, or a board's defaults. A session
+// started from it runs in the first one and gets the rest via
+// `claude --add-dir`. The backend validates and normalizes paths (`~`
+// expansion, must exist); the caller's `save` pushes the change.
+export function DirectoryList({
+  directories,
+  save: persist,
+  editing,
+  onDone,
+  emptyHint = "New sessions start in the first directory; others are added with --add-dir.",
+  testId = "task",
+}: Props) {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
 
-  const save = async (directories: string[]) => {
+  const save = async (next: string[]) => {
     try {
-      await setTaskDirectories(task.id, directories);
+      await persist(next);
       setError(null);
       return true;
     } catch (err) {
@@ -35,7 +46,7 @@ export function TaskDirectories({ task, editing, onDone }: Props) {
   const add = async () => {
     const path = draft.trim();
     if (!path) return;
-    if (await save([...task.directories, path])) setDraft("");
+    if (await save([...directories, path])) setDraft("");
   };
 
   // Native picker (see `pick_directory` in src-tauri/src/lib.rs). Guarded so
@@ -45,8 +56,8 @@ export function TaskDirectories({ task, editing, onDone }: Props) {
     setPicking(true);
     try {
       const picked = await invoke<string | null>("pick_directory");
-      if (!picked || task.directories.includes(picked)) return; // cancelled / already there
-      await save([...task.directories, picked]);
+      if (!picked || directories.includes(picked)) return; // cancelled / already there
+      await save([...directories, picked]);
     } catch (err) {
       setError(`Couldn't open the folder picker: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -56,22 +67,22 @@ export function TaskDirectories({ task, editing, onDone }: Props) {
 
   return (
     // Clicks here must not toggle the card's collapse state or start a drag.
-    <div data-testid="task-directories" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
-      {task.directories.length > 0 && (
+    <div data-testid={`${testId}-directories`} onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+      {directories.length > 0 && (
         <div className={styles.dirList}>
-          {task.directories.map((dir, i) => (
+          {directories.map((dir, i) => (
             <span
               key={dir}
               className={`${styles.dirChip} ${i === 0 ? styles.dirChipPrimary : ""}`}
               title={i === 0 ? `${dir} (working directory)` : `${dir} (--add-dir)`}
-              data-testid="task-directory"
+              data-testid={`${testId}-directory`}
             >
               <span className={styles.dirChipName}>{basename(dir)}</span>
               {editing && (
                 <button
                   className={styles.iconButton}
                   aria-label={`Remove ${dir}`}
-                  onClick={() => void save(task.directories.filter((d) => d !== dir))}
+                  onClick={() => void save(directories.filter((d) => d !== dir))}
                 >
                   ✕
                 </button>
@@ -98,14 +109,14 @@ export function TaskDirectories({ task, editing, onDone }: Props) {
                 if (e.key === "Enter") void add();
                 if (e.key === "Escape") onDone();
               }}
-              data-testid="task-directory-input"
+              data-testid={`${testId}-directory-input`}
             />
             <button
               type="button"
               className={styles.dirBrowse}
               onClick={() => void browse()}
               disabled={picking}
-              data-testid="task-directory-browse"
+              data-testid={`${testId}-directory-browse`}
             >
               {picking ? "Choosing…" : "Browse…"}
             </button>
@@ -114,9 +125,7 @@ export function TaskDirectories({ task, editing, onDone }: Props) {
             <div className={styles.dirError}>{error}</div>
           ) : (
             <div className={styles.dirHint}>
-              {task.directories.length === 0
-                ? "New sessions start in the first directory; others are added with --add-dir."
-                : "Enter to add · Esc to close"}
+              {directories.length === 0 ? emptyHint : "Enter to add · Esc to close"}
             </div>
           )}
         </>

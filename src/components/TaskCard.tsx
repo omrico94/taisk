@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { deleteTask, updateTask } from "../api";
+import { deleteTask, setTaskDirectories, updateTask } from "../api";
 import { openExternal } from "../openExternal";
 import { useSessionStore } from "../store/sessionStore";
 import { taskMeta, taskRollup } from "../store/selectors";
@@ -7,7 +7,7 @@ import { fmtCost, fmtTokens, toolColorVar } from "../styles/sessionStyle";
 import type { SessionView, Task, TicketRef } from "../types";
 import { beginDrag, endDrag, getDrag, moveSession } from "./boardActions";
 import { SessionRow } from "./SessionRow";
-import { TaskDirectories } from "./TaskDirectories";
+import { DirectoryList } from "./DirectoryList";
 import styles from "./Kanban.module.css";
 
 interface Props {
@@ -38,6 +38,9 @@ function TicketChip({ ticket }: { ticket: TicketRef }) {
   );
 }
 
+const NO_DIRS: string[] = [];
+const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
+
 export function TaskCard({ task, sessions, done }: Props) {
   const collapsed = useSessionStore((s) => s.collapsedTasks.has(task.id));
   const toggle = useSessionStore((s) => s.toggleTaskCollapsed);
@@ -50,6 +53,7 @@ export function TaskCard({ task, sessions, done }: Props) {
   const isDragging = drag.kind === "task" && drag.taskId === task.id;
   const sessionOver = drag.kind === "session" && overTaskId === task.id && drag.srcTaskId !== task.id;
   const [editingDirs, setEditingDirs] = useState(false);
+  const boardDirs = useSessionStore((s) => s.boards.find((b) => b.id === task.board)?.directories ?? NO_DIRS);
   const [renamingTitle, setRenamingTitle] = useState(false);
 
   // Mirrors Column.tsx's own `rename` (double-click to edit, blur/Enter to
@@ -191,7 +195,17 @@ export function TaskCard({ task, sessions, done }: Props) {
       )}
       {task.ticket && <TicketChip ticket={task.ticket} />}
       {(editingDirs || task.directories.length > 0) && (
-        <TaskDirectories task={task} editing={editingDirs} onDone={() => setEditingDirs(false)} />
+        <DirectoryList
+          directories={task.directories}
+          save={(dirs) => setTaskDirectories(task.id, dirs)}
+          editing={editingDirs}
+          onDone={() => setEditingDirs(false)}
+          emptyHint={
+            boardDirs.length > 0
+              ? `None yet — new sessions use the board's folders (${basename(boardDirs[0])}${boardDirs.length > 1 ? ` +${boardDirs.length - 1}` : ""}), unless an earlier session ran elsewhere.`
+              : undefined
+          }
+        />
       )}
 
       {roll.total > 0 ? (

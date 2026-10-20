@@ -203,6 +203,9 @@ export interface Board {
   id: string;
   name: string;
   config_dir: string;
+  /** Default directories for sessions started from this board's tasks, when
+   *  the task has none and no previous session's cwd to reuse. */
+  directories: string[];
 }
 
 export const DEFAULT_BOARD_ID = "default";
