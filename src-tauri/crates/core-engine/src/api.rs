@@ -253,14 +253,27 @@ fn ticket_prompt(state: &AppState, ticket: Option<&TicketRef>, has_sessions: boo
 /// 4. the home dir.
 /// For a directory list, the first one that still exists is the cwd and every
 /// other existing one is handed to `claude --add-dir`; a list with nothing
-/// left on disk is skipped.
+/// left on disk is skipped. When the session cwd is itself one of the board's
+/// directories (typically: the task's first session started there), the
+/// board's other directories still come along as `--add-dir`, so a second
+/// session doesn't silently lose them.
 fn task_launch_dirs(task_dirs: &[String], fallback_cwd: Option<String>, board_dirs: &[String]) -> (String, Vec<String>) {
+    let is_dir = |d: &String| std::path::Path::new(d).is_dir();
     let split = |dirs: &[String]| {
-        let mut existing = dirs.iter().filter(|d| std::path::Path::new(d).is_dir()).cloned();
+        let mut existing = dirs.iter().filter(|d| is_dir(d)).cloned();
         existing.next().map(|cwd| (cwd, existing.collect::<Vec<_>>()))
     };
+    let from_session = |cwd: String| {
+        let trimmed = cwd.trim_end_matches('/');
+        let add = if board_dirs.iter().any(|d| d == trimmed) {
+            board_dirs.iter().filter(|d| *d != trimmed && is_dir(d)).cloned().collect()
+        } else {
+            vec![]
+        };
+        (cwd, add)
+    };
     split(task_dirs)
-        .or_else(|| fallback_cwd.filter(|c| std::path::Path::new(c).is_dir()).map(|c| (c, vec![])))
+        .or_else(|| fallback_cwd.filter(is_dir).map(from_session))
         .or_else(|| split(board_dirs))
         .unwrap_or_else(|| (usable_cwd(None), vec![]))
 }
@@ -1495,6 +1508,10 @@ mod tests {
         // The last session's cwd beats the board's directories...
         let (cwd, add) = task_launch_dirs(&["/gone".into()], Some(a_path.clone()), &[b_path.clone()]);
         assert_eq!((cwd, add), (a_path.clone(), vec![]));
+        // ...but when it is one of them, the board's others still ride along
+        // (a second session on a task whose first started in the board's dirs).
+        let (cwd, add) = task_launch_dirs(none, Some(format!("{b_path}/")), &[a_path.clone(), b_path.clone(), "/gone".into(), c_path.clone()]);
+        assert_eq!((cwd, add), (format!("{b_path}/"), vec![a_path.clone(), c_path.clone()]));
         // ...which are used when there's no (usable) session cwd.
         let (cwd, add) = task_launch_dirs(none, Some("/gone".into()), &["/gone".into(), b_path.clone(), c_path.clone()]);
         assert_eq!((cwd, add), (b_path, vec![c_path]));

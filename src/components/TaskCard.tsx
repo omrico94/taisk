@@ -202,7 +202,7 @@ export function TaskCard({ task, sessions, done }: Props) {
           onDone={() => setEditingDirs(false)}
           emptyHint={
             boardDirs.length > 0
-              ? `None yet — new sessions reuse the last session's folder, else the board's default (${basename(boardDirs[0])}).`
+              ? `None yet — new sessions use the board's folders (${basename(boardDirs[0])}${boardDirs.length > 1 ? ` +${boardDirs.length - 1}` : ""}), unless an earlier session ran elsewhere.`
               : undefined
           }
         />
