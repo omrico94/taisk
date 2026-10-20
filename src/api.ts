@@ -179,6 +179,16 @@ export async function renameBoard(id: string, name: string): Promise<Board> {
   return resp.json();
 }
 
+/** Replaces the board's default directories (validated by the backend). */
+export async function setBoardDirectories(id: string, directories: string[]): Promise<Board> {
+  const resp = await boardRequest(`${API_BASE}/boards/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ directories }),
+  });
+  return resp.json();
+}
+
 export async function deleteBoard(id: string): Promise<void> {
   await boardRequest(`${API_BASE}/boards/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

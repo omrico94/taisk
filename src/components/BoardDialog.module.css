@@ -78,8 +78,17 @@
   border: 1px solid var(--border-08);
 }
 
+.row {
+  flex-wrap: wrap;
+}
+
 .rowMain {
   min-width: 0;
+  flex: 1;
+}
+
+.rowDirs {
+  flex-basis: 100%;
 }
 
 .rowName {
@@ -117,6 +126,11 @@
 
 .small:hover {
   background: rgba(255, 255, 255, 0.09);
+}
+
+.smallOn {
+  border-color: var(--tk-lime);
+  color: var(--tk-lime);
 }
 
 .danger:hover {

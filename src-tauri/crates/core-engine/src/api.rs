@@ -207,7 +207,8 @@ async fn open_task_terminal(
     let snap = state.tasks.snapshot().await;
     let task = snap.tasks.iter().find(|t| t.id == task_id).ok_or(StatusCode::NOT_FOUND)?.clone();
     let has_sessions = snap.assignments.values().any(|t| *t == task_id);
-    let (cwd, add_dirs) = task_launch_dirs(&task.directories, body.and_then(|Json(b)| b.cwd));
+    let board_dirs = state.boards.get(&task.board).map(|b| b.directories).unwrap_or_default();
+    let (cwd, add_dirs) = task_launch_dirs(&task.directories, body.and_then(|Json(b)| b.cwd), &board_dirs);
     let mut env = board_env(&state, &task.board);
     env.push(("SESSIONBOARD_TASK_ID".to_string(), task_id.clone()));
     trust_project_dir(&state, &task.board, &cwd);
@@ -245,22 +246,29 @@ fn ticket_prompt(state: &AppState, ticket: Option<&TicketRef>, has_sessions: boo
     Some(state.trackers.registry.get(&ticket.provider)?.session_prompt(ticket))
 }
 
-/// Where a session started from a task runs: the task's first attached
-/// directory that still exists is the cwd and every other existing one is
-/// handed to `claude --add-dir`. With nothing attached (or nothing left on
-/// disk) it falls back to `fallback_cwd` (the frontend sends the task's most
-/// recent session's cwd), then the home dir, same as before directories.
-fn task_launch_dirs(directories: &[String], fallback_cwd: Option<String>) -> (String, Vec<String>) {
-    let mut existing = directories.iter().filter(|d| std::path::Path::new(d).is_dir()).cloned();
-    match existing.next() {
-        Some(cwd) => (cwd, existing.collect()),
-        None => (usable_cwd(fallback_cwd), vec![]),
-    }
+/// Where a session started from a task runs, first match wins:
+/// 1. the task's attached directories,
+/// 2. `fallback_cwd` (the frontend sends the task's most recent session's cwd),
+/// 3. the board's default directories,
+/// 4. the home dir.
+/// For a directory list, the first one that still exists is the cwd and every
+/// other existing one is handed to `claude --add-dir`; a list with nothing
+/// left on disk is skipped.
+fn task_launch_dirs(task_dirs: &[String], fallback_cwd: Option<String>, board_dirs: &[String]) -> (String, Vec<String>) {
+    let split = |dirs: &[String]| {
+        let mut existing = dirs.iter().filter(|d| std::path::Path::new(d).is_dir()).cloned();
+        existing.next().map(|cwd| (cwd, existing.collect::<Vec<_>>()))
+    };
+    split(task_dirs)
+        .or_else(|| fallback_cwd.filter(|c| std::path::Path::new(c).is_dir()).map(|c| (c, vec![])))
+        .or_else(|| split(board_dirs))
+        .unwrap_or_else(|| (usable_cwd(None), vec![]))
 }
 
-/// Validates directories typed into a task: `~` expanded, trailing slashes
-/// dropped, duplicates removed; each must be an existing absolute directory.
-fn normalize_task_directories(raw: &[String]) -> Result<Vec<String>, String> {
+/// Validates directories typed into a task or a board: `~` expanded, trailing
+/// slashes dropped, duplicates removed; each must be an existing absolute
+/// directory.
+fn normalize_directories(raw: &[String]) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     for entry in raw.iter().map(|d| d.trim()).filter(|d| !d.is_empty()) {
         let path = crate::boards::expand_home(entry);
@@ -462,7 +470,9 @@ async fn create_board(
 
 #[derive(Deserialize)]
 struct UpdateBoardBody {
-    name: String,
+    name: Option<String>,
+    /// Replaces the board's default directories (see `Board::directories`).
+    directories: Option<Vec<String>>,
 }
 
 async fn update_board(
@@ -470,7 +480,17 @@ async fn update_board(
     Path(id): Path<String>,
     Json(body): Json<UpdateBoardBody>,
 ) -> Result<Json<Board>, (StatusCode, Json<ApiError>)> {
-    state.boards.rename(&id, &body.name).map(Json).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))
+    let bad = |e: String| api_error(StatusCode::BAD_REQUEST, e);
+    // Validate everything before changing anything.
+    let directories = body.directories.as_deref().map(normalize_directories).transpose().map_err(bad)?;
+    let mut board = state.boards.get(&id).ok_or_else(|| bad("no such board".into()))?;
+    if let Some(name) = &body.name {
+        board = state.boards.rename(&id, name).map_err(bad)?;
+    }
+    if let Some(dirs) = directories {
+        board = state.boards.set_directories(&id, dirs).map_err(bad)?;
+    }
+    Ok(Json(board))
 }
 
 #[derive(Deserialize)]
@@ -646,7 +666,7 @@ async fn update_task(
     let directories = body
         .directories
         .as_deref()
-        .map(normalize_task_directories)
+        .map(normalize_directories)
         .transpose()
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
     state.tasks.update(&id, body.title.as_deref(), body.stage.as_deref()).await.map_err(task_error)?;
@@ -1413,16 +1433,73 @@ mod tests {
         state.terminal.kill_all();
     }
 
+    #[tokio::test]
+    async fn board_directories_are_validated_and_start_sessions_of_tasks_without_their_own() {
+        let (base, state) = spawn_test_server().await;
+        let client = reqwest::Client::new();
+        let task = state.tasks.create("Fresh", "todo").await.unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let a_path = a.path().to_string_lossy().to_string();
+
+        let r = client
+            .patch(format!("{base}/boards/{DEFAULT_BOARD_ID}"))
+            .json(&serde_json::json!({"name": "Renamed", "directories": ["/definitely/not/a/dir"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        let board = state.boards.get(DEFAULT_BOARD_ID).unwrap();
+        assert_eq!(board.name, "Default", "a bad path must not half-apply the patch");
+        assert!(board.directories.is_empty());
+        let r = client.patch(format!("{base}/boards/ghost")).json(&serde_json::json!({"directories": []})).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+
+        let board: Board = client
+            .patch(format!("{base}/boards/{DEFAULT_BOARD_ID}"))
+            .json(&serde_json::json!({"directories": [format!("{a_path}/"), a_path]}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!((board.name.as_str(), board.directories.clone()), ("Default", vec![a_path.clone()]));
+
+        // No task directories and no session cwd: the board's directory is used.
+        let opened: serde_json::Value =
+            client.post(format!("{base}/terminals/tasks/{}", task.id)).send().await.unwrap().json().await.unwrap();
+        let info: serde_json::Value = client
+            .get(format!("{base}/terminals/{}", opened["pty_id"].as_str().unwrap()))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(info["cwd"], a_path);
+        state.terminal.kill_all();
+    }
+
     #[test]
     fn task_launch_dirs_skips_vanished_dirs_and_falls_back() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
         let a_path = a.path().to_string_lossy().to_string();
         let b_path = b.path().to_string_lossy().to_string();
-        let (cwd, add) = task_launch_dirs(&["/gone".into(), a_path.clone(), b_path.clone()], None);
-        assert_eq!((cwd, add), (a_path.clone(), vec![b_path]));
-        let (cwd, add) = task_launch_dirs(&["/gone".into()], Some(a_path.clone()));
-        assert_eq!((cwd, add), (a_path, vec![]));
+        let c = tempfile::tempdir().unwrap();
+        let c_path = c.path().to_string_lossy().to_string();
+        let home = usable_cwd(None);
+        let none: &[String] = &[];
+        let (cwd, add) = task_launch_dirs(&["/gone".into(), a_path.clone(), b_path.clone()], Some(c_path.clone()), &[c_path.clone()]);
+        assert_eq!((cwd, add), (a_path.clone(), vec![b_path.clone()]));
+        // The last session's cwd beats the board's directories...
+        let (cwd, add) = task_launch_dirs(&["/gone".into()], Some(a_path.clone()), &[b_path.clone()]);
+        assert_eq!((cwd, add), (a_path.clone(), vec![]));
+        // ...which are used when there's no (usable) session cwd.
+        let (cwd, add) = task_launch_dirs(none, Some("/gone".into()), &["/gone".into(), b_path.clone(), c_path.clone()]);
+        assert_eq!((cwd, add), (b_path, vec![c_path]));
+        let (cwd, add) = task_launch_dirs(none, None, &["/gone".into()]);
+        assert_eq!((cwd, add), (home, vec![]));
     }
 
     #[tokio::test]
