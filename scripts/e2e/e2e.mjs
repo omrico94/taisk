@@ -496,7 +496,7 @@ await story("E15", "Session overlay: identity, stats, ctx colours, subagents, pl
   ok(!(await overlay().innerText()).includes("part of task"), "no caption for an unassigned session");
 });
 
-await story("E16", "Jump into session: enabled for CLI, disabled for Desktop", async (s) => {
+await story("E16", "Jump into session: enabled for CLI and Desktop, including a Desktop session that's waiting", async (s) => {
   await fresh();
   await mk("cli", "A plain terminal session");
   await mk("dsk", "A Claude Desktop session", { entrypoint: "claude-desktop" });
@@ -508,8 +508,14 @@ await story("E16", "Jump into session: enabled for CLI, disabled for Desktop", a
   await s("jump-enabled");
   await page.keyboard.press("Escape");
   await chip("dsk").locator("[class*=chipTitle]").click(); await overlay().waitFor();
-  ok(await overlay().getByRole("button", { name: /Jump into this session/ }).isDisabled(), "Desktop session: jump disabled");
-  await s("jump-disabled");
+  ok(await overlay().getByRole("button", { name: /Jump into this session/ }).isEnabled(), "Desktop session: jump enabled");
+  await s("jump-desktop");
+  await page.keyboard.press("Escape");
+  seed("permission", "dsk");
+  await until(async () => (await sess("dsk")).state === "Waiting", "desktop waiting");
+  await chip("dsk").locator("[class*=chipTitle]").click(); await overlay().waitFor();
+  ok(await overlay().getByRole("button", { name: /Jump into this session/ }).isEnabled(), "waiting Desktop session: jump enabled");
+  await s("jump-desktop-waiting");
 });
 
 await story("E17", "Delete a session from the row, the chip and the overlay — and it stays gone after restart", async (s) => {

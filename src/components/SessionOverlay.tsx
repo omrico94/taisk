@@ -156,13 +156,14 @@ export function SessionOverlay({ nowMs }: Props) {
     selectCard(null);
   };
 
-  // Phase 2 roadmap item 6: only a CLI-originated session (a plain terminal
-  // `claude` invocation) can be reattached to via `claude --resume <id>`.
-  // There's no known deep-link for a specific Claude Desktop tab, so that
-  // case gets an honest disabled button instead of a fallback gesture that
-  // looks session-specific but isn't.
-  const canJump = session.entrypoint === "cli";
-  // Same underlying limitation as `canJump`: delivering an answer means
+  // Jump is always available, whatever the session's origin or state:
+  // `claude --resume <id>` works on any session whose transcript lives in
+  // `~/.claude/projects` — Claude Desktop's Code sessions included — so a
+  // Desktop session (even one paused on a question) can be picked up in the
+  // board's terminal pane. The original Desktop tab isn't closed by this;
+  // there's still no deep-link to focus it directly.
+  const isDesktop = session.entrypoint === "claude-desktop";
+  // Answering from the board is still CLI-only: delivering an answer means
   // reaching the session's real terminal — an embedded pty the board opened
   // itself, or (the common case) the bare tty of an external one (see
   // `api.ts`'s doc comments) — neither of which exists for a Claude Desktop
@@ -180,6 +181,20 @@ export function SessionOverlay({ nowMs }: Props) {
     // The terminal pane becomes the focus; get the overlay out of the way.
     selectCard(null);
   };
+
+  const jumpButton = (
+    <button
+      className={styles.jumpButton}
+      onClick={jumpToSession}
+      title={
+        isDesktop
+          ? "Resume this Claude Desktop session in a terminal (claude --resume). The Desktop tab stays open — avoid typing in both at once."
+          : "Resume this session in a terminal (claude --resume)"
+      }
+    >
+      Jump into this session ↗
+    </button>
+  );
 
   return (
     <div className={styles.scrim} data-testid="session-overlay" onClick={() => selectCard(null)}>
@@ -349,9 +364,10 @@ export function SessionOverlay({ nowMs }: Props) {
         <div className={`${styles.footer} ${styles.waitingFooter}`}>
           {question && <div className={styles.questionText}>{question.question}</div>}
           <div className={styles.deliveryError}>
-            This session was started from Claude Desktop — there's no way to answer it from the board yet. Switch to
-            that window to respond.
+            This session was started from Claude Desktop — it can't be answered from the board directly. Switch to
+            that window to respond, or jump into it from a terminal.
           </div>
+          {jumpButton}
         </div>
       ) : isWaiting && question ? (
         <div className={`${styles.footer} ${styles.waitingFooter}`}>
@@ -403,6 +419,7 @@ export function SessionOverlay({ nowMs }: Props) {
               Couldn't reach the session automatically — answer it directly in the terminal.
             </div>
           )}
+          {jumpButton}
         </div>
       ) : isWaiting ? (
         <div className={`${styles.footer} ${styles.waitingFooter}`}>
@@ -428,22 +445,11 @@ export function SessionOverlay({ nowMs }: Props) {
               Couldn't reach the session automatically — answer it directly in the terminal.
             </div>
           )}
+          {jumpButton}
         </div>
       ) : (
         <div className={styles.footer}>
-          {canJump ? (
-            <button className={styles.jumpButton} onClick={jumpToSession}>
-              Jump into this session ↗
-            </button>
-          ) : (
-            <button
-              className={styles.jumpButton}
-              disabled
-              title="This session was started from Claude Desktop — there's no way to jump to a specific Desktop tab yet."
-            >
-              Jump into this session ↗
-            </button>
-          )}
+          {jumpButton}
         </div>
       )}
     </div>

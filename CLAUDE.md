@@ -153,9 +153,9 @@ These transcript keys were confirmed against a real transcript; read them with `
 - Claude Code hooks are registered idempotently into `~/.claude/settings.json` (`settings_merge.rs` — safe to re-run, identifies its own entries by the `hook-bridge` binary path in `command`).
 - Session transcripts are read from `~/.claude/projects/<sanitized-cwd>/<session_id>.jsonl` — sanitization logic lives in `collector.rs`'s `transcript_path()`.
 
-### `entrypoint` drives what "Jump to session" can do
+### `entrypoint` and "Jump to session"
 
-`SessionView.entrypoint` is `"cli"` (plain terminal `claude`) or `"claude-desktop"` — captured from the real hook payload at session-start, defaulting to `"cli"` when absent (durable `memories` rows have no record of it, so reconstruction can't recover the original value either). Only `"cli"` sessions can be reattached to (`claude --resume <id>` via a new Terminal window, `src-tauri/src/lib.rs`'s `jump_to_cli_session` command) — there's no known deep-link for a specific Claude Desktop tab, so that case is an honest disabled button, not a fallback guess.
+`SessionView.entrypoint` is `"cli"` (plain terminal `claude`) or `"claude-desktop"` — captured from the real hook payload at session-start, defaulting to `"cli"` when absent (durable `memories` rows have no record of it, so reconstruction can't recover the original value either). "Jump into this session" works for **every** session, whatever its entrypoint or state (Waiting included): it runs `claude --resume <id>` in the board's terminal pane (`POST /terminals/sessions/:id`). Claude Desktop's Code sessions write the same `~/.claude/projects` transcripts, so they resume too. There's still no deep-link to focus a specific Desktop tab, and answering a Waiting session *from the board* stays CLI-only (`canAnswerFromBoard`), so a Desktop session's Waiting footer offers Jump instead.
 
 ### Shortcut kit (global hotkeys)
 
